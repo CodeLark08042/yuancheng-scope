@@ -52,6 +52,8 @@ var BTNS = [
   { x0: 138, x1: 174, id: 3, label: 'D1' },
   { x0: 176, x1: 212, id: 4, label: 'D2' },
   { x0: 214, x1: 250, id: 5, label: 'D3' },
+  { x0: 254, x1: 284, id: 6, label: 'F-' },
+  { x0: 288, x1: 318, id: 7, label: 'F+' },
 ];
 var MASK = {1:1,2:2,3:4,4:8,5:16};
 var COL  = {1:'#4488ff',2:'#ff4040',3:'#44ff44',4:'#ffff40',5:'#ff40ff',G:'#00ffff'};
@@ -59,6 +61,7 @@ var OFF  = {on:'#000', off:'#888'};
 
 var gear = 0;
 var mask = 31;
+var waveFreq = 1000;
 
 /* ---- 状态与数据管道（与 C 一致） ---- */
 var ch1 = new Array(TOTAL).fill(0);
@@ -219,11 +222,15 @@ function draw() {
   button(BTNS[3], !!(mask & 4), '#44ff44');
   button(BTNS[4], !!(mask & 8), '#ffff40');
   button(BTNS[5], !!(mask & 16), '#ff40ff');
+  button(BTNS[6], true, '#cccccc');
+  button(BTNS[7], true, '#cccccc');
 
-  txt('F:' + String(tk % 100000).padStart(5,'0'), 256, 2, '#fff', 6);
-  txt('dp:' + '0', 308, 2, '#fff', 6);
-  txt('ce:' + String(crc).padStart(4,'0'), 358, 2, '#fff', 6);
-  txt('seq' + String(tk % 100000).padStart(5,'0'), 408, 2, '#fff', 6);
+  txt('W:' + String(waveFreq).padStart(4,'0') + 'Hz', 320, 2, '#00ffff', 6);
+  txt('F' + String(tk % 10000).padStart(4,'0'), 378, 2, '#fff', 6);
+  txt('dp' + String(0).padStart(2,'0'), 402, 2, '#fff', 6);
+  txt('ce' + String(crc).padStart(2,'0'), 426, 2, '#fff', 6);
+  txt('TS', 450, 2, '#44ff44', 6);
+  txt('S', 468, 2, '#00ffff', 6);
 
   /* 测量 */
   function drawMeas() {
@@ -255,6 +262,16 @@ c.addEventListener('click', function (e) {
   for (var i = 0; i < BTNS.length; i++) {
     if (x >= BTNS[i].x0 && x <= BTNS[i].x1) {
       if (BTNS[i].id === 0) { gear = (gear + 1) % 5; }
+      else if (BTNS[i].id === 6) { if (waveFreq >= 200) waveFreq -= 100; }
+      else if (BTNS[i].id === 7) { if (waveFreq <= 9900) waveFreq += 100; }
+      else if (BTNS[i].id === 8) {
+        /* 网页预览用输入框代替板上的数字键盘 */
+        var s = prompt('设置矩形波频率（100-10000 Hz）', waveFreq);
+        if (s !== null) {
+          var v = parseInt(s, 10);
+          if (!isNaN(v)) { waveFreq = Math.max(100, Math.min(10000, v)); }
+        }
+      }
       else { mask ^= MASK[BTNS[i].id]; }
       return;
     }

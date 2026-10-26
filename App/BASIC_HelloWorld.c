@@ -55,7 +55,7 @@ static const char *gear_txt[5] = { "10ms", "5ms", "1ms", "500us", "100us" };
 /* ---------------- 触摸按钮区域 ---------------- */
 typedef struct {
   uint16_t x0, x1;
-  uint8_t  id;        /* 0 = 档位；1..5 = 通道 */
+  uint8_t  id;        /* 0=档位；1..5=通道；6=F-；7=F+；8=频率显示区（点开键盘） */
 } btn_t;
 
 static const btn_t buttons[] = {
@@ -65,6 +65,9 @@ static const btn_t buttons[] = {
   { 138, 174, 3 },     /* D1  */
   { 176, 212, 4 },     /* D2  */
   { 214, 250, 5 },     /* D3  */
+  { 254, 284, 6 },     /* F-  */
+  { 288, 318, 7 },     /* F+  */
+  { 320, 377, 8 },     /* W: 频率显示区 —— 点击弹出数字键盘 */
 };
 #define BTN_NUM   (sizeof(buttons) / sizeof(buttons[0]))
 
@@ -72,6 +75,26 @@ static const btn_t buttons[] = {
 static uint8_t g_gear = GEAR_10MS;
 static uint8_t g_mask = MASK_CH1 | MASK_CH2 | MASK_D1 | MASK_D2 | MASK_D3;
 static uint8_t g_touch_down = 0;
+static uint16_t g_wave_freq = 1000;     /* 矩形波频率（Hz），默认 1kHz，范围 100~10000 */
+
+/* ---- 数字键盘状态 ---- */
+static uint8_t g_kp_open = 0;           /* 键盘是否弹出 */
+static char    g_kp_buf[7];             /* 输入缓冲，最多 6 位数字 */
+static uint8_t g_kp_len = 0;
+
+/* 键盘布局常量（弹窗占满屏宽 30~450，高 30~260） */
+#define KP_X0        30
+#define KP_Y0        30
+#define KP_X1       450
+#define KP_Y1       258
+#define KP_ROW_Y0    96          /* 第一行按键顶部 y */
+#define KP_ROW_H     36          /* 按键高度 */
+#define KP_ROW_GAP    2
+#define KP_COL0_X    45
+#define KP_COL_W     85
+#define KP_COL_GAP    5
+#define KP_FN_X     320          /* 功能列起点 */
+#define KP_FN_W     120
 
 /* ---------------- 数据缓冲 ---------------- */
 static uint16_t ch1[TOTAL_PTS];     /* raw12 */
@@ -353,37 +376,47 @@ static void draw_topbar(uint32_t frame, uint8_t ts_ok, uint8_t link_ok)
   draw_button(buttons[4].x0, 0, buttons[4].x1, TOP_H - 2, "D2", (m & MASK_D2) ? 1 : 0, GUI_YELLOW);
   draw_button(buttons[5].x0, 0, buttons[5].x1, TOP_H - 2, "D3", (m & MASK_D3) ? 1 : 0, GUI_MAGENTA);
 
+  /* 矩形波频率按钮 */
+  draw_button(buttons[6].x0, 0, buttons[6].x1, TOP_H - 2, "F-", 1, GUI_LIGHTGRAY);
+  draw_button(buttons[7].x0, 0, buttons[7].x1, TOP_H - 2, "F+", 1, GUI_LIGHTGRAY);
+
   /* 右侧统计信息（6x8 字体） */
   GUI_SetFont(&GUI_Font6x8);
   GUI_SetTextMode(GUI_TM_TRANS);
 
+  /* 当前矩形波频率 */
+  GUI_SetColor(GUI_CYAN);
+  GUI_DispStringAt("W:", 320, 2);
+  GUI_DispDecAt((I32)g_wave_freq, 332, 2, 4);
+  GUI_DispStringAt("Hz", 360, 2);
+
   GUI_SetColor(GUI_WHITE);
-  GUI_DispStringAt("F", 256, 2);
-  GUI_DispDecAt((I32)(frame % 100000), 262, 2, 5);
+  GUI_DispStringAt("F", 378, 2);
+  GUI_DispDecAt((I32)(frame % 10000), 384, 2, 4);
 
-  GUI_DispStringAt("dp", 296, 2);
-  GUI_DispDecAt((I32)st->drop, 308, 2, 4);
+  GUI_DispStringAt("dp", 402, 2);
+  GUI_DispDecAt((I32)st->drop, 414, 2, 2);
 
-  GUI_DispStringAt("ce", 334, 2);
-  GUI_DispDecAt((I32)st->crc_err, 346, 2, 4);
+  GUI_DispStringAt("ce", 426, 2);
+  GUI_DispDecAt((I32)st->crc_err, 438, 2, 2);
 
   /* 触摸驱动状态 */
   if (ts_ok) {
     GUI_SetColor(GUI_GREEN);
-    GUI_DispStringAt("TS", 370, 2);
+    GUI_DispStringAt("TS", 450, 2);
   } else {
     GUI_SetColor(GUI_RED);
-    GUI_DispStringAt("TE", 370, 2);
-    GUI_DispDecAt((I32)touch_error(), 382, 2, 1);
+    GUI_DispStringAt("TE", 450, 2);
+    GUI_DispDecAt((I32)touch_error(), 462, 2, 1);
   }
 
   /* 数据源：F=假数据自测，U=USART6 实时接收；link_ok=0 表示超过 500ms 无有效帧 */
 #ifdef RX_SOURCE_UART
   GUI_SetColor(link_ok ? GUI_GREEN : GUI_RED);
-  GUI_DispStringAt(link_ok ? "U OK" : "U LOST", 396, 2);
+  GUI_DispStringAt(link_ok ? "U" : "L", 468, 2);
 #else
   GUI_SetColor(GUI_CYAN);
-  GUI_DispStringAt("F SIM", 396, 2);
+  GUI_DispStringAt("S", 468, 2);
 #endif
 }
 
@@ -459,10 +492,190 @@ static void draw_meas(void)
   }
 }
 
+/* ---------------- 数字键盘（设置矩形波频率） ----------------
+   弹出式键盘：点击顶栏 "W:xxxxHz" 打开，输入 100~10000 后按 OK 生效。
+   布局（4 列 × 4 行）：
+       1   2   3  | DEL
+       4   5   6  | CLR
+       7   8   9  | CAN
+          0       | OK
+--------------------------------------------------------- */
+static void draw_key(int x0, int y0, int x1, int y1, const char *label, GUI_COLOR c)
+{
+  GUI_SetColor(c);
+  GUI_FillRect(x0, y0, x1, y1);
+  GUI_SetColor(GUI_BLACK);
+  GUI_DrawRect(x0, y0, x1, y1);
+  GUI_SetFont(&GUI_Font8x16);
+  GUI_SetTextMode(GUI_TM_TRANS);
+  GUI_SetColor(GUI_BLACK);
+  GUI_DispStringAt(label, x0 + ((x1 - x0 + 1) - strlen_(label) * 8) / 2, y0 + 9);
+}
+
+static void draw_keypad(void)
+{
+  int r, c;
+  int y;
+  char num[2];
+
+  if (!g_kp_open) {
+    return;
+  }
+
+  /* 弹窗底板 + 边框 */
+  GUI_SetColor(GUI_LIGHTGRAY);
+  GUI_FillRect(KP_X0, KP_Y0, KP_X1, KP_Y1);
+  GUI_SetColor(GUI_WHITE);
+  GUI_DrawRect(KP_X0, KP_Y0, KP_X1, KP_Y1);
+  GUI_DrawRect(KP_X0 + 1, KP_Y0 + 1, KP_X1 - 1, KP_Y1 - 1);
+
+  /* 标题 */
+  GUI_SetFont(&GUI_Font8x16);
+  GUI_SetTextMode(GUI_TM_TRANS);
+  GUI_SetColor(GUI_BLACK);
+  GUI_DispStringAt("Set Rect Wave Freq (100-10000 Hz)", KP_X0 + 10, KP_Y0 + 6);
+
+  /* 输入显示区 */
+  GUI_SetColor(GUI_WHITE);
+  GUI_FillRect(KP_X0 + 10, KP_Y0 + 28, KP_X1 - 10, KP_Y0 + 56);
+  GUI_SetColor(GUI_BLACK);
+  GUI_DrawRect(KP_X0 + 10, KP_Y0 + 28, KP_X1 - 10, KP_Y0 + 56);
+
+  GUI_SetFont(&GUI_Font8x16);
+  GUI_SetColor(GUI_BLACK);
+  if (g_kp_len == 0) {
+    GUI_SetColor(GUI_GRAY);
+    GUI_DispStringAt("input...", KP_X0 + 20, KP_Y0 + 32);
+  } else {
+    uint8_t i;
+    for (i = 0; i < g_kp_len; i++) {
+      num[0] = g_kp_buf[i];
+      num[1] = 0;
+      GUI_DispStringAt(num, KP_X0 + 20 + i * 10, KP_Y0 + 32);
+    }
+    GUI_SetColor(GUI_BLUE);
+    GUI_DispStringAt("Hz", KP_X0 + 24 + g_kp_len * 10, KP_Y0 + 32);
+  }
+
+  /* 数字键 1~9 */
+  for (r = 0; r < 3; r++) {
+    y = KP_ROW_Y0 + r * (KP_ROW_H + KP_ROW_GAP);
+    for (c = 0; c < 3; c++) {
+      int x = KP_COL0_X + c * (KP_COL_W + KP_COL_GAP);
+      num[0] = (char)('1' + r * 3 + c);
+      num[1] = 0;
+      draw_key(x, y, x + KP_COL_W, y + KP_ROW_H, num, GUI_WHITE);
+    }
+  }
+
+  /* 0 键（占满三列） */
+  y = KP_ROW_Y0 + 3 * (KP_ROW_H + KP_ROW_GAP);
+  draw_key(KP_COL0_X, y,
+           KP_COL0_X + 3 * KP_COL_W + 2 * KP_COL_GAP, y + KP_ROW_H,
+           "0", GUI_WHITE);
+
+  /* 功能键列 */
+  draw_key(KP_FN_X, KP_ROW_Y0 + 0 * (KP_ROW_H + KP_ROW_GAP),
+           KP_FN_X + KP_FN_W, KP_ROW_Y0 + 0 * (KP_ROW_H + KP_ROW_GAP) + KP_ROW_H,
+           "DEL", GUI_LIGHTGRAY);
+
+  draw_key(KP_FN_X, KP_ROW_Y0 + 1 * (KP_ROW_H + KP_ROW_GAP),
+           KP_FN_X + KP_FN_W, KP_ROW_Y0 + 1 * (KP_ROW_H + KP_ROW_GAP) + KP_ROW_H,
+           "CLR", GUI_LIGHTGRAY);
+
+  draw_key(KP_FN_X, KP_ROW_Y0 + 2 * (KP_ROW_H + KP_ROW_GAP),
+           KP_FN_X + KP_FN_W, KP_ROW_Y0 + 2 * (KP_ROW_H + KP_ROW_GAP) + KP_ROW_H,
+           "CAN", GUI_LIGHTGRAY);
+
+  draw_key(KP_FN_X, KP_ROW_Y0 + 3 * (KP_ROW_H + KP_ROW_GAP),
+           KP_FN_X + KP_FN_W, KP_ROW_Y0 + 3 * (KP_ROW_H + KP_ROW_GAP) + KP_ROW_H,
+           "OK", GUI_GREEN);
+}
+
+/* 键盘触摸：返回 1 表示事件已被键盘消费 */
+static uint8_t handle_keypad_tap(uint16_t x, uint16_t y)
+{
+  int r, c;
+
+  /* 弹窗范围外：视为关闭 */
+  if (x < KP_X0 || x > KP_X1 || y < KP_Y0 || y > KP_Y1) {
+    g_kp_open = 0;
+    return 1;
+  }
+
+  /* 数字键区 1~9 */
+  for (r = 0; r < 3; r++) {
+    int ry0 = KP_ROW_Y0 + r * (KP_ROW_H + KP_ROW_GAP);
+    if (y < ry0 || y > ry0 + KP_ROW_H) {
+      continue;
+    }
+    for (c = 0; c < 3; c++) {
+      int cx0 = KP_COL0_X + c * (KP_COL_W + KP_COL_GAP);
+      if (x >= cx0 && x <= cx0 + KP_COL_W) {
+        if (g_kp_len < 5) {                       /* 最多 5 位（10000） */
+          g_kp_buf[g_kp_len++] = (char)('1' + r * 3 + c);
+          g_kp_buf[g_kp_len] = 0;
+        }
+        return 1;
+      }
+    }
+    /* 功能列（前 3 行） */
+    if (x >= KP_FN_X && x <= KP_FN_X + KP_FN_W) {
+      if (r == 0) {                               /* DEL */
+        if (g_kp_len > 0) { g_kp_len--; g_kp_buf[g_kp_len] = 0; }
+      } else if (r == 1) {                        /* CLR */
+        g_kp_len = 0;
+        g_kp_buf[0] = 0;
+      } else {                                    /* CAN */
+        g_kp_open = 0;
+      }
+      return 1;
+    }
+    return 1;                                     /* 行内空白，吞掉事件 */
+  }
+
+  /* 第 4 行：0 键 + OK */
+  {
+    int ry0 = KP_ROW_Y0 + 3 * (KP_ROW_H + KP_ROW_GAP);
+    if (y >= ry0 && y <= ry0 + KP_ROW_H) {
+      if (x >= KP_FN_X && x <= KP_FN_X + KP_FN_W) {
+        /* OK：解析并限幅到 100~10000 */
+        if (g_kp_len > 0) {
+          uint32_t v = 0;
+          uint8_t  i;
+          for (i = 0; i < g_kp_len; i++) {
+            v = v * 10 + (uint32_t)(g_kp_buf[i] - '0');
+          }
+          if (v < 100)    { v = 100; }
+          if (v > 10000)  { v = 10000; }
+          g_wave_freq = (uint16_t)v;
+          send_ctrl(CMD_WAVE_FREQ, g_wave_freq);
+        }
+        g_kp_open = 0;
+      } else if (x >= KP_COL0_X &&
+                 x <= KP_COL0_X + 3 * KP_COL_W + 2 * KP_COL_GAP) {
+        if (g_kp_len < 5) {
+          g_kp_buf[g_kp_len++] = '0';
+          g_kp_buf[g_kp_len] = 0;
+        }
+      }
+      return 1;
+    }
+  }
+
+  return 1;
+}
+
 /* ---------------- 触摸处理 ---------------- */
 static void handle_tap(uint16_t x, uint16_t y)
 {
   uint8_t i;
+
+  /* 键盘弹出时，所有触摸都交给键盘 */
+  if (g_kp_open) {
+    (void)handle_keypad_tap(x, y);
+    return;
+  }
 
   if (y > TOP_H) {
     return;                 /* 只有顶部按钮区响应 */
@@ -474,6 +687,35 @@ static void handle_tap(uint16_t x, uint16_t y)
         /* 档位循环：10ms → 5ms → 1ms → 500us → 100us */
         g_gear = (uint8_t)((g_gear + 1) % 5);
         send_ctrl(CMD_GEAR, g_gear);
+      } else if (buttons[i].id == 6) {
+        /* 矩形波频率 -100Hz */
+        if (g_wave_freq >= 200) {
+          g_wave_freq -= 100;
+        }
+        send_ctrl(CMD_WAVE_FREQ, g_wave_freq);
+      } else if (buttons[i].id == 7) {
+        /* 矩形波频率 +100Hz */
+        if (g_wave_freq <= 9900) {
+          g_wave_freq += 100;
+        }
+        send_ctrl(CMD_WAVE_FREQ, g_wave_freq);
+      } else if (buttons[i].id == 8) {
+        /* 打开数字键盘，预填当前频率 */
+        uint16_t v = g_wave_freq;
+        uint8_t  n = 0;
+        char     tmp[6];
+
+        g_kp_len = 0;
+        if (v == 0) { v = 1; }
+        while (v > 0 && n < 5) {          /* 拆成十进制数字 */
+          tmp[n++] = (char)('0' + (v % 10));
+          v /= 10;
+        }
+        while (n > 0) {                    /* 反转写入缓冲 */
+          g_kp_buf[g_kp_len++] = tmp[--n];
+        }
+        g_kp_buf[g_kp_len] = 0;
+        g_kp_open = 1;
       } else {
         uint8_t bit = (uint8_t)(1u << (buttons[i].id - 1));
         g_mask ^= bit;
@@ -593,6 +835,7 @@ void MainTask(void)
     draw_digital();
     draw_topbar(frame, ts_ok, link_ok);
     draw_meas();
+    draw_keypad();          /* 键盘弹出时覆盖在波形之上 */
 
     GUI_MULTIBUF_End();
 
