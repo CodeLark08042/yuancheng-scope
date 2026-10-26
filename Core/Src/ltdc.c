@@ -215,6 +215,25 @@ void HAL_LTDC_MspInit(LTDC_HandleTypeDef* ltdcHandle)
        原 STemWin 例程的 HAL_LTDC_MspInit 里有这三行，移植时随例程函数一起被删掉了。 */
     HAL_NVIC_SetPriority(LTDC_IRQn, 0xE, 0);
     HAL_NVIC_EnableIRQ(LTDC_IRQn);
+
+    /* CubeMX 6.18.1 生成 PLLSAIDivR 时会忽略 .ioc 里的 RCC_PLLSAIDIVR_4，
+       固定写成 RCC_PLLSAIDIVR_2，像素时钟从 9.6MHz 变成 19.2MHz（面板无法锁定，背光亮但全黑）。
+       这里在 LTDC 初始化之前再配一次时钟，把分频锁回 4。
+       注意：变量名不能叫 PeriphClkInitStruct，生成区已有同名变量。 */
+    {
+      RCC_PeriphCLKInitTypeDef ltdcClk = {0};
+      ltdcClk.PeriphClockSelection = RCC_PERIPHCLK_LTDC;
+      ltdcClk.PLLSAI.PLLSAIN = 192;
+      ltdcClk.PLLSAI.PLLSAIR = 5;
+      ltdcClk.PLLSAI.PLLSAIQ = 2;
+      ltdcClk.PLLSAI.PLLSAIP = RCC_PLLSAIP_DIV2;
+      ltdcClk.PLLSAIDivQ = 1;
+      ltdcClk.PLLSAIDivR = RCC_PLLSAIDIVR_4;   /* 192/5/4 = 9.6MHz */
+      if (HAL_RCCEx_PeriphCLKConfig(&ltdcClk) != HAL_OK)
+      {
+        Error_Handler();
+      }
+    }
   /* USER CODE END LTDC_MspInit 1 */
   }
 }

@@ -58,6 +58,7 @@ void SystemClock_Config(void);
 static void MPU_Config(void);
 /* USER CODE BEGIN PFP */
 extern void MainTask(void);
+static void MPU_Config_App(void);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -92,7 +93,10 @@ int main(void)
   SystemClock_Config();
 
   /* USER CODE BEGIN SysInit */
-
+  /* 重新配置 MPU：CubeMX 生成的 MPU_Config() 每次都会被重写（Region 1 丢失、
+     Region 0 的 SubRegionDisable 变回 0x87），因此在这里用自己的版本覆盖。
+     位置必须在 MX_FMC_Init()/MX_LTDC_Init() 之前，保证首次访问 SDRAM 时已是非缓存。 */
+  MPU_Config_App();
   /* USER CODE END SysInit */
 
   /* Initialize all configured peripherals */
@@ -176,7 +180,43 @@ void SystemClock_Config(void)
 }
 
 /* USER CODE BEGIN 4 */
+/* 板级 MPU 配置（不修改生成区，供 SysInit 阶段调用）：
+   Region 0：背景区，关闭 0/1/2/5/6/7 子区，与原始工程一致；
+   Region 1：SDRAM 0xC0000000 起 32MB，Normal + 非缓存 + 非缓冲，全权限。
+   LTDC/DMA2D 直接读物理内存，若为可缓存，CPU 写入会停在 cache 里，屏幕表现为黑屏/旧数据。 */
+static void MPU_Config_App(void)
+{
+  MPU_Region_InitTypeDef MPU_InitStruct = {0};
 
+  HAL_MPU_Disable();
+
+  MPU_InitStruct.Enable           = MPU_REGION_ENABLE;
+  MPU_InitStruct.Number           = MPU_REGION_NUMBER0;
+  MPU_InitStruct.BaseAddress      = 0x0;
+  MPU_InitStruct.Size             = MPU_REGION_SIZE_4GB;
+  MPU_InitStruct.SubRegionDisable = 0xE7;
+  MPU_InitStruct.TypeExtField     = MPU_TEX_LEVEL0;
+  MPU_InitStruct.AccessPermission = MPU_REGION_NO_ACCESS;
+  MPU_InitStruct.DisableExec      = MPU_INSTRUCTION_ACCESS_DISABLE;
+  MPU_InitStruct.IsShareable      = MPU_ACCESS_SHAREABLE;
+  MPU_InitStruct.IsCacheable      = MPU_ACCESS_NOT_CACHEABLE;
+  MPU_InitStruct.IsBufferable     = MPU_ACCESS_NOT_BUFFERABLE;
+  HAL_MPU_ConfigRegion(&MPU_InitStruct);
+
+  MPU_InitStruct.Number           = MPU_REGION_NUMBER1;
+  MPU_InitStruct.BaseAddress      = 0xC0000000;
+  MPU_InitStruct.Size             = MPU_REGION_SIZE_32MB;
+  MPU_InitStruct.SubRegionDisable = 0x00;
+  MPU_InitStruct.TypeExtField     = MPU_TEX_LEVEL1;
+  MPU_InitStruct.AccessPermission = MPU_REGION_FULL_ACCESS;
+  MPU_InitStruct.DisableExec      = MPU_INSTRUCTION_ACCESS_ENABLE;
+  MPU_InitStruct.IsShareable      = MPU_ACCESS_NOT_SHAREABLE;
+  MPU_InitStruct.IsCacheable      = MPU_ACCESS_NOT_CACHEABLE;
+  MPU_InitStruct.IsBufferable     = MPU_ACCESS_NOT_BUFFERABLE;
+  HAL_MPU_ConfigRegion(&MPU_InitStruct);
+
+  HAL_MPU_Enable(MPU_PRIVILEGED_DEFAULT);
+}
 /* USER CODE END 4 */
 
  /* MPU Configuration */
