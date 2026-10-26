@@ -52,14 +52,24 @@ void uart_rx_start(void)
 
 void uart_rx_poll(void (*feed)(uint8_t))
 {
-  while (s_rd != s_wr) {
-    uint8_t b = s_ring[s_rd];
-    s_rd = (uint16_t)((s_rd + 1) % RX_RING_SIZE);
+  /* 先把两个 volatile 指针各读一次存入局部变量，
+     避免在同一个表达式里同时读 s_rd / s_wr——
+     IAR Pa082：volatile 访问顺序在 C 标准中未定义。 */
+  uint16_t rd = s_rd;
+  uint16_t wr = s_wr;
+
+  while (rd != wr) {
+    uint8_t b = s_ring[rd];
+    rd = (uint16_t)((rd + 1) % RX_RING_SIZE);
     s_total++;
     if (feed) {
       feed(b);
     }
+    /* 中断可能又收到新字节，重新取一次写指针 */
+    wr = s_wr;
   }
+
+  s_rd = rd;
 }
 
 uint32_t uart_rx_bytes(void)
