@@ -352,9 +352,9 @@
           <state>$PROJ_DIR$/../Drivers/STM32F7xx_HAL_Driver/Inc/Legacy</state>
           <state>$PROJ_DIR$/../Drivers/CMSIS/Device/ST/STM32F7xx/Include</state>
           <state>$PROJ_DIR$/../Drivers/CMSIS/Include</state>
-          <state>$PROJ_DIR$/../Middlewares/STemWin/Target</state>
-          <state>$PROJ_DIR$/../Middlewares/STemWin/inc</state>
-          <state>$PROJ_DIR$/../Middlewares/STemWin/OS</state>
+          <state>$PROJ_DIR$/../ThirdParty/STemWin/Target</state>
+          <state>$PROJ_DIR$/../ThirdParty/STemWin/inc</state>
+          <state>$PROJ_DIR$/../ThirdParty/STemWin/OS</state>
           <state>$PROJ_DIR$/../App</state>
         </option>
         <option>
@@ -1216,19 +1216,19 @@
   <group>
     <name>STemWin</name>
     <file>
-      <name>$PROJ_DIR$\..\Middlewares\STemWin\OS\GUI_X.c</name>
+      <name>$PROJ_DIR$\..\ThirdParty\STemWin\OS\GUI_X.c</name>
     </file>
     <file>
-      <name>$PROJ_DIR$\..\Middlewares\STemWin\Target\GUIConf.c</name>
+      <name>$PROJ_DIR$\..\ThirdParty\STemWin\Target\GUIConf.c</name>
     </file>
     <file>
-      <name>$PROJ_DIR$\..\Middlewares\STemWin\Target\LCDConf.c</name>
+      <name>$PROJ_DIR$\..\ThirdParty\STemWin\Target\LCDConf.c</name>
     </file>
   </group>
   <group>
     <name>STemWin_Lib</name>
     <file>
-      <name>$PROJ_DIR$\..\Middlewares\STemWin\Lib\STemWin_CM7_wc32.a</name>
+      <name>$PROJ_DIR$\..\ThirdParty\STemWin\Lib\STemWin_CM7_wc32.a</name>
     </file>
   </group>
 </project>
