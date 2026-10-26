@@ -54,7 +54,15 @@ var BTNS = [
   { x0: 214, x1: 250, id: 5, label: 'D3' },
   { x0: 254, x1: 284, id: 6, label: 'F-' },
   { x0: 288, x1: 318, id: 7, label: 'F+' },
+  { x0: 320, x1: 377, id: 8, label: 'W'  },   /* 频率显示区：点击弹键盘 */
+  { x0: 400, x1: 470, id: 9, label: 'SAVE' },
 ];
+
+/* 导出菜单布局（与 C 的 MN_* 一致） */
+var MN_X0 = 120, MN_Y0 = 80, MN_X1 = 360, MN_Y1 = 210;
+var MN_BTN_Y0 = 115, MN_BTN_H = 36, MN_BTN_W = 96;
+var MN_CAN_Y = 168, MN_CSV_X = 135, MN_BMP_X = 249, MN_CAN_X = 180, MN_CAN_W = 120;
+var menuOpen = 0;
 var MASK = {1:1,2:2,3:4,4:8,5:16};
 var COL  = {1:'#4488ff',2:'#ff4040',3:'#44ff44',4:'#ffff40',5:'#ff40ff',G:'#00ffff'};
 var OFF  = {on:'#000', off:'#888'};
@@ -224,13 +232,11 @@ function draw() {
   button(BTNS[5], !!(mask & 16), '#ff40ff');
   button(BTNS[6], true, '#cccccc');
   button(BTNS[7], true, '#cccccc');
+  button(BTNS[9], true, '#ff8800');
 
-  txt('W:' + String(waveFreq).padStart(4,'0') + 'Hz', 320, 2, '#00ffff', 6);
-  txt('F' + String(tk % 10000).padStart(4,'0'), 378, 2, '#fff', 6);
-  txt('dp' + String(0).padStart(2,'0'), 402, 2, '#fff', 6);
-  txt('ce' + String(crc).padStart(2,'0'), 426, 2, '#fff', 6);
-  txt('TS', 450, 2, '#44ff44', 6);
-  txt('S', 468, 2, '#00ffff', 6);
+  txt('W:' + String(waveFreq).padStart(4,'0') + 'Hz', 322, 2, '#00ffff', 6);
+  txt('T', 380, 2, '#44ff44', 6);
+  txt('S', 392, 2, '#00ffff', 6);
 
   /* 测量 */
   function drawMeas() {
@@ -251,6 +257,72 @@ function draw() {
     }
   }
   drawMeas();
+
+  /* 导出菜单：弹出时覆盖在最上层 */
+  if (menuOpen) { drawMenu(); }
+}
+
+/* ---- 导出菜单（对应 C 的 draw_menu） ---- */
+function menuKey(x, y, w, h, label, colr) {
+  ctx.fillStyle = colr; ctx.fillRect(x, y, w, h);
+  ctx.strokeStyle = '#000'; ctx.strokeRect(x, y, w, h);
+  txt(label, x + (w - label.length*8)/2, y + 10, '#000');
+}
+function drawMenu() {
+  ctx.fillStyle = '#c0c0c0';
+  ctx.fillRect(MN_X0, MN_Y0, MN_X1 - MN_X0, MN_Y1 - MN_Y0);
+  ctx.strokeStyle = '#fff';
+  ctx.strokeRect(MN_X0, MN_Y0, MN_X1 - MN_X0, MN_Y1 - MN_Y0);
+
+  txt('Export Waveform', MN_X0 + 12, MN_Y0 + 10, '#000');
+  menuKey(MN_CSV_X, MN_BTN_Y0, MN_BTN_W, MN_BTN_H, 'CSV', '#00ffff');
+  menuKey(MN_BMP_X, MN_BTN_Y0, MN_BTN_W, MN_BTN_H, 'BMP', '#ff00ff');
+  txt('-> PC via USB COM', MN_X0 + 12, MN_BTN_Y0 + MN_BTN_H + 8, '#888', 6);
+  menuKey(MN_CAN_X, MN_CAN_Y, MN_CAN_W, MN_BTN_H, 'CANCEL', '#ffffff');
+}
+
+/* ---- 网页版导出：直接下载文件（板上是经 USART1 发到串口助手） ---- */
+function download(blob, name) {
+  var a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = name;
+  a.click();
+  setTimeout(function () { URL.revokeObjectURL(a.href); }, 1000);
+}
+function exportCsvPreview() {
+  var dt = DT_US[gear], s = '';
+  s += '# Remote Data Acquisition System - Waveform Export\r\n';
+  s += '# Gear=' + GEAR_TXT[gear] + ', dt_us=' + dt + ', points=' + TOTAL + ', pts_per_div=50\r\n';
+  s += '# Vref_mV=3300 (nominal), raw12 range 0..4095\r\n';
+  s += 'idx,time_us,CH1_raw,CH1_mV,CH2_raw,CH2_mV,D1,D2,D3\r\n';
+  for (var k = 0; k < TOTAL; k++) {
+    var j = idx(k), r1 = ch1[j], r2 = ch2[j], d = dig[j];
+    s += k + ',' + k*dt + ',' + r1 + ',' + Math.floor(r1*3300/4095) + ','
+      + r2 + ',' + Math.floor(r2*3300/4095) + ','
+      + ((d & 4) ? 1 : 0) + ',' + ((d & 8) ? 1 : 0) + ',' + ((d & 16) ? 1 : 0) + '\r\n';
+  }
+  download(new Blob([s], {type:'text/csv'}), 'waveform.csv');
+}
+function exportBmpPreview() {
+  var w = SCR_W, h = SCR_H, rowBytes = w*3, pad = (4 - rowBytes%4) % 4;
+  var stride = rowBytes + pad, imgSize = stride*h, fileSize = 54 + imgSize;
+  var buf = new ArrayBuffer(fileSize), dv = new DataView(buf), u8 = new Uint8Array(buf);
+  u8[0] = 0x42; u8[1] = 0x4D;                      /* 'BM' */
+  dv.setUint32(2, fileSize, true); dv.setUint32(10, 54, true);
+  dv.setUint32(14, 40, true); dv.setInt32(18, w, true); dv.setInt32(22, h, true);
+  dv.setUint16(26, 1, true); dv.setUint16(28, 24, true);
+  dv.setUint32(34, imgSize, true); dv.setUint32(38, 2835, true); dv.setUint32(42, 2835, true);
+  var data = ctx.getImageData(0, 0, w, h).data;
+  for (var y = 0; y < h; y++) {
+    var srcY = h - 1 - y, off = 54 + y*stride;     /* BMP 自底向上 */
+    for (var x = 0; x < w; x++) {
+      var si = (srcY*w + x) * 4;                   /* RGBA → BGR */
+      u8[off + x*3 + 0] = data[si + 2];
+      u8[off + x*3 + 1] = data[si + 1];
+      u8[off + x*3 + 2] = data[si + 0];
+    }
+  }
+  download(new Blob([buf], {type:'image/bmp'}), 'scope.bmp');
 }
 
 /* ---- 交互：点击 = 触摸按钮（与 C 的 handle_tap 一致） ---- */
@@ -258,12 +330,30 @@ c.addEventListener('click', function (e) {
   var r = c.getBoundingClientRect();
   var x = Math.round((e.clientX - r.left) * (SCR_W / r.width));
   var y = Math.round((e.clientY - r.top)  * (SCR_H / r.height));
+
+  /* 导出菜单弹出时，所有点击都交给菜单 */
+  if (menuOpen) {
+    if (x < MN_X0 || x > MN_X1 || y < MN_Y0 || y > MN_Y1) { menuOpen = 0; return; }
+    if (y >= MN_BTN_Y0 && y <= MN_BTN_Y0 + MN_BTN_H) {
+      if (x >= MN_CSV_X && x <= MN_CSV_X + MN_BTN_W) {
+        menuOpen = 0; draw(); exportCsvPreview(); return;
+      }
+      if (x >= MN_BMP_X && x <= MN_BMP_X + MN_BTN_W) {
+        menuOpen = 0; draw(); exportBmpPreview(); return;
+      }
+    }
+    if (y >= MN_CAN_Y && y <= MN_CAN_Y + MN_BTN_H &&
+        x >= MN_CAN_X && x <= MN_CAN_X + MN_CAN_W) { menuOpen = 0; }
+    return;
+  }
+
   if (y > TOP_H) return;
   for (var i = 0; i < BTNS.length; i++) {
     if (x >= BTNS[i].x0 && x <= BTNS[i].x1) {
       if (BTNS[i].id === 0) { gear = (gear + 1) % 5; }
       else if (BTNS[i].id === 6) { if (waveFreq >= 200) waveFreq -= 100; }
       else if (BTNS[i].id === 7) { if (waveFreq <= 9900) waveFreq += 100; }
+      else if (BTNS[i].id === 9) { menuOpen = 1; }
       else if (BTNS[i].id === 8) {
         /* 网页预览用输入框代替板上的数字键盘 */
         var s = prompt('设置矩形波频率（100-10000 Hz）', waveFreq);

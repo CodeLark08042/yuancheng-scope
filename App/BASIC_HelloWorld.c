@@ -23,6 +23,8 @@
 #include "fakesrc.h"
 #include "touch.h"
 #include "uart_rx.h"
+#include "log_uart.h"
+#include "export.h"
 #include "usart.h"
 
 /* ==================== 数据源选择 ====================
@@ -68,6 +70,7 @@ static const btn_t buttons[] = {
   { 254, 284, 6 },     /* F-  */
   { 288, 318, 7 },     /* F+  */
   { 320, 377, 8 },     /* W: 频率显示区 —— 点击弹出数字键盘 */
+  { 400, 470, 9 },     /* SAVE 导出菜单 */
 };
 #define BTN_NUM   (sizeof(buttons) / sizeof(buttons[0]))
 
@@ -81,6 +84,28 @@ static uint16_t g_wave_freq = 1000;     /* 矩形波频率（Hz），默认 1kHz
 static uint8_t g_kp_open = 0;           /* 键盘是否弹出 */
 static char    g_kp_buf[7];             /* 输入缓冲，最多 6 位数字 */
 static uint8_t g_kp_len = 0;
+
+/* ---- 导出菜单状态 ---- */
+static uint8_t  g_menu_open = 0;        /* 导出菜单是否弹出 */
+
+/* ---- 最近一帧的状态：导出 BMP 时用它重绘同一画面 ---- */
+static uint32_t g_last_frame   = 0;
+static uint8_t  g_last_ts_ok   = 1;
+static uint8_t  g_last_link_ok = 1;
+
+/* 导出菜单布局 */
+#define MN_X0       120
+#define MN_Y0        80
+#define MN_X1       360
+#define MN_Y1       210
+#define MN_BTN_Y0   115
+#define MN_BTN_H     36
+#define MN_BTN_W     96
+#define MN_CAN_Y    168
+#define MN_CSV_X    135
+#define MN_BMP_X    249
+#define MN_CAN_X    180
+#define MN_CAN_W    120
 
 /* 键盘布局常量（弹窗占满屏宽 30~450，高 30~260） */
 #define KP_X0        30
@@ -380,43 +405,36 @@ static void draw_topbar(uint32_t frame, uint8_t ts_ok, uint8_t link_ok)
   draw_button(buttons[6].x0, 0, buttons[6].x1, TOP_H - 2, "F-", 1, GUI_LIGHTGRAY);
   draw_button(buttons[7].x0, 0, buttons[7].x1, TOP_H - 2, "F+", 1, GUI_LIGHTGRAY);
 
-  /* 右侧统计信息（6x8 字体） */
+  /* 导出按钮 */
+  draw_button(buttons[9].x0, 0, buttons[9].x1, TOP_H - 2, "SAVE", 1, GUI_ORANGE);
+
+  /* 右侧状态信息（6x8 字体） */
   GUI_SetFont(&GUI_Font6x8);
   GUI_SetTextMode(GUI_TM_TRANS);
 
   /* 当前矩形波频率 */
   GUI_SetColor(GUI_CYAN);
-  GUI_DispStringAt("W:", 320, 2);
-  GUI_DispDecAt((I32)g_wave_freq, 332, 2, 4);
-  GUI_DispStringAt("Hz", 360, 2);
+  GUI_DispStringAt("W:", 322, 2);
+  GUI_DispDecAt((I32)g_wave_freq, 334, 2, 4);
+  GUI_DispStringAt("Hz", 362, 2);
 
-  GUI_SetColor(GUI_WHITE);
-  GUI_DispStringAt("F", 378, 2);
-  GUI_DispDecAt((I32)(frame % 10000), 384, 2, 4);
-
-  GUI_DispStringAt("dp", 402, 2);
-  GUI_DispDecAt((I32)st->drop, 414, 2, 2);
-
-  GUI_DispStringAt("ce", 426, 2);
-  GUI_DispDecAt((I32)st->crc_err, 438, 2, 2);
-
-  /* 触摸驱动状态 */
+  /* 触摸状态：T=OK，E+错误码=异常 */
   if (ts_ok) {
     GUI_SetColor(GUI_GREEN);
-    GUI_DispStringAt("TS", 450, 2);
+    GUI_DispStringAt("T", 380, 2);
   } else {
     GUI_SetColor(GUI_RED);
-    GUI_DispStringAt("TE", 450, 2);
-    GUI_DispDecAt((I32)touch_error(), 462, 2, 1);
+    GUI_DispStringAt("E", 380, 2);
+    GUI_DispDecAt((I32)touch_error(), 386, 2, 1);
   }
 
-  /* 数据源：F=假数据自测，U=USART6 实时接收；link_ok=0 表示超过 500ms 无有效帧 */
+  /* 数据源：S=假数据自测，U=USART6 实时，L=链路断开 */
 #ifdef RX_SOURCE_UART
   GUI_SetColor(link_ok ? GUI_GREEN : GUI_RED);
-  GUI_DispStringAt(link_ok ? "U" : "L", 468, 2);
+  GUI_DispStringAt(link_ok ? "U" : "L", 392, 2);
 #else
   GUI_SetColor(GUI_CYAN);
-  GUI_DispStringAt("S", 468, 2);
+  GUI_DispStringAt("S", 392, 2);
 #endif
 }
 
@@ -666,6 +684,132 @@ static uint8_t handle_keypad_tap(uint16_t x, uint16_t y)
   return 1;
 }
 
+/* ---------------- 导出菜单 ----------------
+   点击顶栏 SAVE 弹出，选择导出 CSV 或 BMP。
+   导出数据经 USART1（ST-Link 虚拟串口）发到 PC。
+--------------------------------------------------------- */
+/* 导出用的线性副本（环形缓冲 → 时间顺序） */
+static uint16_t s_lin1[TOTAL_PTS];
+static uint16_t s_lin2[TOTAL_PTS];
+static uint8_t  s_lind[TOTAL_PTS];
+
+static void make_linear_copy(void)
+{
+  uint16_t i;
+
+  for (i = 0; i < TOTAL_PTS; i++) {
+    uint16_t j = idx_of(i);
+    s_lin1[i] = ch1[j];
+    s_lin2[i] = ch2[j];
+    s_lind[i] = dig[j];
+  }
+}
+
+/* 导出期间显示提示（在 Begin/End 之间调用） */
+static void show_exporting(const char *what)
+{
+  GUI_MULTIBUF_Begin();
+  GUI_SetColor(GUI_BLACK);
+  GUI_Clear();
+  GUI_SetFont(&GUI_Font8x16);
+  GUI_SetTextMode(GUI_TM_TRANS);
+  GUI_SetColor(GUI_CYAN);
+  GUI_DispStringAt("Exporting", 180, 110);
+  GUI_SetColor(GUI_WHITE);
+  GUI_DispStringAt(what, 180, 130);
+  GUI_SetColor(GUI_GRAY);
+  GUI_DispStringAt("via USB (ST-Link COM)", 130, 160);
+  GUI_MULTIBUF_End();
+}
+
+static void do_export_csv(void)
+{
+  make_linear_copy();
+  show_exporting("CSV ...");
+  (void)export_csv(s_lin1, s_lin2, s_lind, TOTAL_PTS, proto_stat()->gear);
+}
+
+/* 整帧重绘函数，定义在 handle_tap 之后 */
+static void draw_screen(void);
+
+static void do_export_bmp(void)
+{
+  uint32_t fb;
+
+  /* 菜单此刻还开着，直接导出会把弹窗一起拍进去。
+     先关菜单、重绘一帧干净画面，等 LTDC 换页完成后再取缓冲地址。 */
+  g_menu_open = 0;
+  draw_screen();
+  HAL_Delay(40);
+
+  fb = export_lcd_fb();          /* 此时扫描的已是干净画面 */
+  show_exporting("BMP ...");
+  (void)export_bmp(fb);
+}
+
+static void draw_menu(void)
+{
+  if (!g_menu_open) {
+    return;
+  }
+
+  GUI_SetColor(GUI_LIGHTGRAY);
+  GUI_FillRect(MN_X0, MN_Y0, MN_X1, MN_Y1);
+  GUI_SetColor(GUI_WHITE);
+  GUI_DrawRect(MN_X0, MN_Y0, MN_X1, MN_Y1);
+  GUI_DrawRect(MN_X0 + 1, MN_Y0 + 1, MN_X1 - 1, MN_Y1 - 1);
+
+  GUI_SetFont(&GUI_Font8x16);
+  GUI_SetTextMode(GUI_TM_TRANS);
+  GUI_SetColor(GUI_BLACK);
+  GUI_DispStringAt("Export Waveform", MN_X0 + 12, MN_Y0 + 10);
+
+  draw_key(MN_CSV_X, MN_BTN_Y0, MN_CSV_X + MN_BTN_W, MN_BTN_Y0 + MN_BTN_H,
+           "CSV", GUI_CYAN);
+  draw_key(MN_BMP_X, MN_BTN_Y0, MN_BMP_X + MN_BTN_W, MN_BTN_Y0 + MN_BTN_H,
+           "BMP", GUI_MAGENTA);
+
+  GUI_SetFont(&GUI_Font6x8);
+  GUI_SetColor(GUI_GRAY);
+  GUI_DispStringAt("-> PC via USB COM", MN_X0 + 12, MN_BTN_Y0 + MN_BTN_H + 8);
+
+  draw_key(MN_CAN_X, MN_CAN_Y, MN_CAN_X + MN_CAN_W, MN_CAN_Y + MN_BTN_H,
+           "CANCEL", GUI_WHITE);
+}
+
+static uint8_t handle_menu_tap(uint16_t x, uint16_t y)
+{
+  /* 弹窗范围外：关闭 */
+  if (x < MN_X0 || x > MN_X1 || y < MN_Y0 || y > MN_Y1) {
+    g_menu_open = 0;
+    return 1;
+  }
+
+  /* CSV / BMP */
+  if (y >= MN_BTN_Y0 && y <= MN_BTN_Y0 + MN_BTN_H) {
+    if (x >= MN_CSV_X && x <= MN_CSV_X + MN_BTN_W) {
+      g_menu_open = 0;
+      do_export_csv();
+      return 1;
+    }
+    if (x >= MN_BMP_X && x <= MN_BMP_X + MN_BTN_W) {
+      g_menu_open = 0;
+      do_export_bmp();
+      return 1;
+    }
+  }
+
+  /* CANCEL */
+  if (y >= MN_CAN_Y && y <= MN_CAN_Y + MN_BTN_H) {
+    if (x >= MN_CAN_X && x <= MN_CAN_X + MN_CAN_W) {
+      g_menu_open = 0;
+      return 1;
+    }
+  }
+
+  return 1;
+}
+
 /* ---------------- 触摸处理 ---------------- */
 static void handle_tap(uint16_t x, uint16_t y)
 {
@@ -674,6 +818,12 @@ static void handle_tap(uint16_t x, uint16_t y)
   /* 键盘弹出时，所有触摸都交给键盘 */
   if (g_kp_open) {
     (void)handle_keypad_tap(x, y);
+    return;
+  }
+
+  /* 导出菜单弹出时，所有触摸都交给菜单 */
+  if (g_menu_open) {
+    (void)handle_menu_tap(x, y);
     return;
   }
 
@@ -716,6 +866,9 @@ static void handle_tap(uint16_t x, uint16_t y)
         }
         g_kp_buf[g_kp_len] = 0;
         g_kp_open = 1;
+      } else if (buttons[i].id == 9) {
+        /* 打开导出菜单 */
+        g_menu_open = 1;
       } else {
         uint8_t bit = (uint8_t)(1u << (buttons[i].id - 1));
         g_mask ^= bit;
@@ -724,6 +877,28 @@ static void handle_tap(uint16_t x, uint16_t y)
       return;
     }
   }
+}
+
+/* ---------------- 整帧绘制 ----------------
+   主循环和 BMP 导出共用：Begin → 画完 → End 整屏切换，避免撕裂。
+   键盘/菜单是弹层，画在最后。
+   ------------------------------------------ */
+static void draw_screen(void)
+{
+  GUI_MULTIBUF_Begin();
+
+  GUI_SetBkColor(GUI_BLACK);
+  GUI_Clear();
+  draw_grid();
+  if (proto_stat()->ch_mask & MASK_CH1) { draw_analog(ch1, GUI_BLUE); }
+  if (proto_stat()->ch_mask & MASK_CH2) { draw_analog(ch2, GUI_RED);  }
+  draw_digital();
+  draw_topbar(g_last_frame, g_last_ts_ok, g_last_link_ok);
+  draw_meas();
+  draw_keypad();          /* 键盘弹出时覆盖在波形之上 */
+  draw_menu();            /* 导出菜单弹出时覆盖在最上层 */
+
+  GUI_MULTIBUF_End();
 }
 
 /* ---------------- 主任务 ---------------- */
@@ -751,6 +926,7 @@ void MainTask(void)
   proto_reset();
 #endif
   ts_ok = touch_init();
+  log_uart_init();        /* USART1 经 ST-Link 虚拟串口，用于导出文件到 PC */
 
   /* 板载按键 B1 = PI11：下拉输入，按下接 VDD 为高电平。
      作为触摸之外的备用档位切换手段（任务书允许按键调节）。 */
@@ -825,19 +1001,10 @@ void MainTask(void)
     }
 
     /* --- 绘制到后台缓冲，结束后整屏切换，消除闪烁 --- */
-    GUI_MULTIBUF_Begin();
-
-    GUI_SetBkColor(GUI_BLACK);
-    GUI_Clear();
-    draw_grid();
-    if (proto_stat()->ch_mask & MASK_CH1) { draw_analog(ch1, GUI_BLUE); }
-    if (proto_stat()->ch_mask & MASK_CH2) { draw_analog(ch2, GUI_RED);  }
-    draw_digital();
-    draw_topbar(frame, ts_ok, link_ok);
-    draw_meas();
-    draw_keypad();          /* 键盘弹出时覆盖在波形之上 */
-
-    GUI_MULTIBUF_End();
+    g_last_frame   = frame;
+    g_last_ts_ok   = ts_ok;
+    g_last_link_ok = link_ok;
+    draw_screen();
 
     frame++;
     HAL_Delay(50);      /* 显示刷新约 20 帧/s */
