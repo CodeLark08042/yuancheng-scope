@@ -26,13 +26,22 @@
 #include "log_uart.h"
 #include "export.h"
 #include "usart.h"
+#include "net_udp.h"
+#include "lwip.h"
 
 /* ==================== 数据源选择 ====================
-   默认（注释掉）：使用板内假数据源 fakesrc，单板即可完整自测波形与测量。
-   取消注释：使用 USART6 接收 A 板真实数据（921600 8N1，PC6/PC7）。
-   两条路径共用同一个协议解析器 proto，切换不影响其它任何功能。
+   三者互斥，取消注释其中一个：
+     RX_SOURCE_UART：USART6 接 A 板数据（921600 8N1，PC6/PC7），适用于 10ms/5ms 档。
+     RX_SOURCE_UDP ：以太网 UDP 接 A 板数据（监听 5005），1ms 及更快档、≥5m 验收必须用这条。
+     都不定义      ：使用板内假数据源 fakesrc，单板即可完整自测波形与测量。
+   三条路径共用同一个协议解析器 proto，切换不影响其它任何功能。
    ==================================================== */
 /* #define RX_SOURCE_UART */
+/* #define RX_SOURCE_UDP */     /* 无网口/U 盘网卡时先注释，用假数据自测 */
+
+#if defined(RX_SOURCE_UART) || defined(RX_SOURCE_UDP)
+  #define RX_SOURCE_LINK      /* 有真实对端，不再伪造数据帧与状态帧回执 */
+#endif
 
 /* ---------------- 界面布局 ---------------- */
 #define SCR_W            480
@@ -139,6 +148,9 @@ static uint8_t  g_menu_open = 0;        /* 导出菜单是否弹出 */
 static uint32_t g_last_frame   = 0;
 static uint8_t  g_last_ts_ok   = 1;
 static uint8_t  g_last_link_ok = 1;
+static uint8_t  g_fps          = 0;     /* 实测渲染帧率，用于验收“≥20 帧/秒” */
+/* 临时性能诊断：绘制四阶段耗时(ms)：0=Begin拷贝 1=清屏+波形 2=文字控件 3=End等VSYNC */
+static uint8_t  g_dbg_t[4]     = { 0, 0, 0, 0 };
 
 /* 导出菜单布局 */
 #define MN_X0       120
@@ -205,9 +217,9 @@ static uint32_t cur_dt_us(void)
   return (g < 5) ? dt_us_tab[g] : dt_us_tab[0];
 }
 
-#ifndef RX_SOURCE_UART
+#ifndef RX_SOURCE_LINK
 /* 假数据源模式：没有 A 板，直接伪造一帧状态帧，让触发面板能看到回执。
-   真实 UART 模式下由 A 板按协议回状态帧。 */
+   真实链路（UART/UDP）下由 A 板按协议回状态帧。 */
 static void fake_status_reply(void)
 {
   uint8_t  buf[PROTO_STATUS_LEN];
@@ -221,15 +233,23 @@ static void fake_status_reply(void)
 }
 #endif
 
-/* ---------------- 控制帧下发 ---------------- */
+/* ---------------- 控制帧下发 ----------------
+   UDP 模式走 5006 端口，UART 模式走 USART6；两边的帧内容完全一致。
+   UDP 链路未连接时 net_udp_send 会静默丢弃，等 link 建立后由主循环补发握手。
+--------------------------------------------------------- */
 static void send_ctrl(uint8_t cmd, uint16_t param)
 {
   uint8_t buf[PROTO_CTRL_LEN];
 
   proto_build_ctrl(buf, cmd, param);
-  HAL_UART_Transmit(&huart6, buf, PROTO_CTRL_LEN, 20);
 
-#ifndef RX_SOURCE_UART
+#if defined(RX_SOURCE_UDP)
+  net_udp_send(buf, PROTO_CTRL_LEN);
+#else
+  HAL_UART_Transmit(&huart6, buf, PROTO_CTRL_LEN, 20);
+#endif
+
+#ifndef RX_SOURCE_LINK
   fake_status_reply();        /* 自测模式：模拟 A 板回执 */
 #endif
 }
@@ -344,24 +364,62 @@ static void draw_grid(void)
   }
 }
 
-/* ---------------- 模拟通道 ---------------- */
+/* ---------------- 模拟通道 ----------------
+   逐点 GUI_DrawLine 在 32bpp 非缓存 SDRAM 上约 0.75us/像素，
+   两路 500 段要 45ms（实测），直接导致帧率掉到 12。
+   改为「每像素列一次竖直填充」：
+     - 500 个采样点映射到 480 列，同列多点取 min/max（等价于真实示波器的包络）
+     - 与上一列的连接点合并，保证跨列不断线
+     - 每次 GUI_FillRect 走 LCDConf 里注册的 DMA2D 填充，硬件完成
+   实测填充 480 列 × 2 路只需几毫秒，画面形态与原折线一致。
+--------------------------------------------------------- */
+static int16_t s_col_min[SCR_W];
+static int16_t s_col_max[SCR_W];
+
 static void draw_analog(const uint16_t *buf, GUI_COLOR color)
 {
-  int i, x = 0, py = 0;
+  int i, col;
+  int prev_y = -1;
+
+  for (col = 0; col < SCR_W; col++) {
+    s_col_min[col] = -1;
+    s_col_max[col] = -1;
+  }
+
+  for (i = 0; i < TOTAL_PTS; i++) {
+    int y = raw12_to_y(buf[idx_of((uint16_t)i)]);
+
+    col = idx_to_x(i);
+    if (s_col_min[col] < 0) {
+      s_col_min[col] = (int16_t)y;
+      s_col_max[col] = (int16_t)y;
+    } else {
+      if (y < s_col_min[col]) { s_col_min[col] = (int16_t)y; }
+      if (y > s_col_max[col]) { s_col_max[col] = (int16_t)y; }
+    }
+  }
 
   GUI_SetColor(color);
-  for (i = 0; i < TOTAL_PTS; i++) {
-    int xi = idx_to_x(i);
-    int y  = raw12_to_y(buf[idx_of((uint16_t)i)]);
 
-    if (i == 0) {
-      x  = xi;
-      py = y;
-    } else {
-      GUI_DrawLine(x, py, xi, y);
-      x  = xi;
-      py = y;
+  for (col = 0; col < SCR_W; col++) {
+    int lo, hi;
+
+    if (s_col_min[col] < 0) {
+      continue;
     }
+
+    lo = s_col_min[col];
+    hi = s_col_max[col];
+
+    /* 与上一列的端点相连，跨列不出现断点 */
+    if (prev_y >= 0) {
+      if (prev_y < lo) { lo = prev_y; }
+      if (prev_y > hi) { hi = prev_y; }
+    }
+
+    GUI_FillRect(col, lo, col, hi);
+
+    prev_y = (s_col_min[col] + s_col_max[col]) / 2;
   }
 }
 
@@ -495,8 +553,11 @@ static void draw_topbar(uint32_t frame, uint8_t ts_ok, uint8_t link_ok)
     GUI_DispDecAt((I32)touch_error(), 386, 2, 1);
   }
 
-  /* 数据源：S=假数据自测，U=USART6 实时，L=链路断开 */
-#ifdef RX_SOURCE_UART
+  /* 数据源：S=假数据自测，U=USART6 实时，E=以太网 UDP，L=链路断开 */
+#if defined(RX_SOURCE_UDP)
+  GUI_SetColor(link_ok ? GUI_GREEN : GUI_RED);
+  GUI_DispStringAt(link_ok ? "E" : "L", 392, 2);
+#elif defined(RX_SOURCE_UART)
   GUI_SetColor(link_ok ? GUI_GREEN : GUI_RED);
   GUI_DispStringAt(link_ok ? "U" : "L", 392, 2);
 #else
@@ -751,6 +812,23 @@ static void draw_link_stats(void)
   GUI_DispStringAt("LINK", 176, 264);
   GUI_SetColor(g_last_link_ok ? GUI_GREEN : GUI_RED);
   GUI_DispStringAt(g_last_link_ok ? "OK" : "--", 200, 264);
+
+  /* 实测帧率：任务书提高部分（3）要求 ≥20 帧/秒，这里给出屏上依据 */
+  GUI_SetColor(GUI_DARKGRAY);
+  GUI_DispStringAt("FPS", 240, 264);
+  GUI_SetColor(g_fps >= 20 ? GUI_GREEN : GUI_ORANGE);
+  GUI_DispDecAt((I32)g_fps, 264, 264, 3);
+
+  /* 临时性能诊断：B/W/T/E 四阶段耗时(ms) */
+  GUI_SetFont(&GUI_Font6x8);
+  GUI_SetColor(GUI_DARKGRAY);  GUI_DispStringAt("B", 300, 264);
+  GUI_SetColor(GUI_WHITE);     GUI_DispDecAt((I32)g_dbg_t[0], 306, 264, 2);
+  GUI_SetColor(GUI_DARKGRAY);  GUI_DispStringAt("W", 320, 264);
+  GUI_SetColor(GUI_WHITE);     GUI_DispDecAt((I32)g_dbg_t[1], 326, 264, 2);
+  GUI_SetColor(GUI_DARKGRAY);  GUI_DispStringAt("T", 340, 264);
+  GUI_SetColor(GUI_WHITE);     GUI_DispDecAt((I32)g_dbg_t[2], 346, 264, 2);
+  GUI_SetColor(GUI_DARKGRAY);  GUI_DispStringAt("E", 360, 264);
+  GUI_SetColor(GUI_WHITE);     GUI_DispDecAt((I32)g_dbg_t[3], 366, 264, 2);
 }
 
 /* ---------------- 数字键盘（设置矩形波频率） ----------------
@@ -1270,7 +1348,11 @@ static void handle_tap(uint16_t x, uint16_t y)
    ------------------------------------------ */
 static void draw_screen(void)
 {
+  uint32_t t0, t1, t2, t3;
+
+  t0 = HAL_GetTick();
   GUI_MULTIBUF_Begin();
+  t1 = HAL_GetTick();
 
   GUI_SetBkColor(GUI_BLACK);
   GUI_Clear();
@@ -1279,25 +1361,39 @@ static void draw_screen(void)
   if (proto_stat()->ch_mask & MASK_CH2) { draw_analog(ch2, GUI_RED);  }
   draw_digital();
   draw_trig_level();      /* 触发电平虚线，压在波形之上 */
+  t2 = HAL_GetTick();
+
   draw_axis();            /* 坐标轴标签最后画，带黑底保证可读 */
   draw_topbar(g_last_frame, g_last_ts_ok, g_last_link_ok);
   draw_meas();
   draw_link_stats();      /* 底部 8px 链路统计条 */
   draw_keypad();          /* 键盘弹出时覆盖在波形之上 */
-  draw_menu();            /* 导出菜单弹出时覆盖在最上层 */
+  draw_menu();            /* 导出菜单放在最上层 */
   draw_trig_panel();      /* 触发设置面板 */
+  t3 = HAL_GetTick();
 
   GUI_MULTIBUF_End();
+
+  /* 临时性能诊断：B=Begin（缓冲区拷贝），W=清屏+波形，T=文字/控件，E=End（等 VSYNC） */
+  g_dbg_t[0] = (uint8_t)(t1 - t0);
+  g_dbg_t[1] = (uint8_t)(t2 - t1);
+  g_dbg_t[2] = (uint8_t)(t3 - t2);
+  g_dbg_t[3] = (uint8_t)(HAL_GetTick() - t3);
 }
 
-/* ---------------- 主任务 ---------------- */
+/* ---------------- 主任务 ----------------
+   循环不再用 HAL_Delay(50) 阻塞：以太网是轮询模式，必须高频调用
+   MX_LWIP_Process() 才能及时取走 DMA 里的帧（1ms 档 A 板每秒发 1000 帧）。
+   因此改成「数据入口每轮都转，渲染按 50ms 节拍做」，屏幕仍是 20 帧/s。
+--------------------------------------------------------- */
 void MainTask(void)
 {
-#ifdef RX_SOURCE_UART
-  /* UART 模式不需要帧缓冲 */
+#if defined(RX_SOURCE_LINK)
+  /* 真实链路（UART/UDP）：没有本地造帧，不需要帧缓冲 */
 #else
   uint8_t  frame_buf[PROTO_DATA_LEN];
   uint16_t i;
+  uint32_t last_fake = 0;
 #endif
   uint32_t frame = 0;
   uint16_t tx, ty;
@@ -1305,12 +1401,22 @@ void MainTask(void)
   uint8_t  key_prev = 0;
   uint32_t last_good = 0;
   uint32_t last_status = 0;
-  uint32_t stall = 0;
+  uint32_t last_good_tick = 0;
+  uint32_t last_draw = 0;
+  uint32_t fps_cnt = 0;
+  uint32_t fps_tick = 0;
+  uint32_t pushed_good = 0;
+  uint32_t repeat_ms = 0;
   uint8_t  link_ok = 1;
-  uint16_t hold_ticks = 0;      /* 按住节拍（50ms/拍），用于电平键连发 */
-  int8_t   repeat_dir = 0;      /* 当前按住的方向，0 = 未按住 +/- */
+  int8_t   repeat_dir = 0;
+#if defined(RX_SOURCE_UDP)
+  uint8_t  phy_up_prev = 0;
+#endif
 
-#ifdef RX_SOURCE_UART
+#if defined(RX_SOURCE_UDP)
+  net_udp_init();         /* 必须在 main() 的 MX_LWIP_Init() 之后 */
+  proto_reset();
+#elif defined(RX_SOURCE_UART)
   proto_reset();
   uart_rx_start();
 #else
@@ -1336,35 +1442,57 @@ void MainTask(void)
   GUI_SetBkColor(GUI_BLACK);
   GUI_Clear();
 
-  for (;;) {
-    /* --- 触摸：按下沿触发一次；停在触发面板电平 +/- 上则连发 --- */
-    if (touch_read(&tx, &ty)) {
-      if (!g_touch_down) {
-        g_touch_down = 1;
-        hold_ticks = 0;
-        repeat_dir = 0;
-        handle_tap(tx, ty);
-      } else {
-        int8_t dir = trig_adj_hit(tx, ty);
+  fps_tick = HAL_GetTick();
+  last_draw = fps_tick;
 
-        if (dir == 0) {
+  for (;;) {
+    /* --- 数据入口（每轮都转，频率远高于渲染） --- */
+#if defined(RX_SOURCE_UDP)
+    MX_LWIP_Process();          /* 轮询以太网：收包在回调里喂给 proto_feed */
+#elif defined(RX_SOURCE_UART)
+    uart_rx_poll(proto_feed);
+#endif
+
+#ifndef RX_SOURCE_LINK
+    /* --- 假数据：每 50ms 造一帧，模拟 A 板 20 帧/秒 --- */
+    if ((uint32_t)(HAL_GetTick() - last_fake) >= 50) {
+      last_fake = HAL_GetTick();
+      fakesrc_tick(frame_buf, g_gear, g_mask);
+      for (i = 0; i < PROTO_DATA_LEN; i++) {
+        proto_feed(frame_buf[i]);
+      }
+    }
+#endif
+
+    /* --- 触摸：按下沿触发一次；停在触发面板电平 +/- 上则连发 --- */
+    {
+      if (touch_read(&tx, &ty)) {
+        if (!g_touch_down) {
+          g_touch_down = 1;
           repeat_dir = 0;
-          hold_ticks = 0;
-        } else if (dir != repeat_dir) {
-          repeat_dir = dir;       /* 换到另一个键，重新计时 */
-          hold_ticks = 0;
+          repeat_ms  = 0;
+          handle_tap(tx, ty);
         } else {
-          hold_ticks++;
-          /* 按住 400ms 后开始连发，之后每 100ms 一步（2 × 50ms） */
-          if (hold_ticks >= 8 && ((hold_ticks - 8) % 2) == 0) {
-            trig_level_step(dir);
+          int8_t   dir = trig_adj_hit(tx, ty);
+          uint32_t now = HAL_GetTick();
+
+          if (dir == 0) {
+            repeat_dir = 0;                 /* 手指移出 +/-：停止连发 */
+            repeat_ms  = 0;
+          } else if (dir != repeat_dir) {
+            repeat_dir = dir;               /* 换到另一个键：重新计时 */
+            repeat_ms  = now + 400;
+          } else if (repeat_ms != 0 &&
+                     (int32_t)(now - repeat_ms) >= 0) {
+            trig_level_step(dir);           /* 按住 400ms 后每 100ms 一步 */
+            repeat_ms = now + 100;
           }
         }
+      } else {
+        g_touch_down = 0;
+        repeat_dir = 0;
+        repeat_ms  = 0;
       }
-    } else {
-      g_touch_down = 0;
-      hold_ticks = 0;
-      repeat_dir = 0;
     }
 
     /* --- 板载按键 B1：按一次切换一个档位 --- */
@@ -1377,16 +1505,6 @@ void MainTask(void)
       key_prev = key;
     }
 
-    /* --- 取数据：假数据源自造 或 USART6 实时接收 --- */
-#ifdef RX_SOURCE_UART
-    uart_rx_poll(proto_feed);
-#else
-    fakesrc_tick(frame_buf, g_gear, g_mask);
-    for (i = 0; i < PROTO_DATA_LEN; i++) {
-      proto_feed(frame_buf[i]);
-    }
-#endif
-
     /* --- A 板状态帧回执：以其为准同步触发配置 --- */
     if (proto_status()->valid && proto_status()->count != last_status) {
       last_status  = proto_status()->count;
@@ -1395,10 +1513,14 @@ void MainTask(void)
       g_trig_level = proto_status()->trig_level;
     }
 
-    /* --- 有新帧 → 50 点灌入环形缓冲 --- */
-    if (proto_frame_ready()) {
+    /* --- 有新帧 → 50 点灌入环形缓冲 ---
+       用 good 计数器判断"是否新帧"：proto_frame_ready() 收到第一帧后一直为 1，
+       若直接用它会导致每轮重复灌同一帧。 */
+    if (proto_stat()->good != pushed_good) {
       const proto_frame_t *f = proto_frame();
       uint16_t pt;
+
+      pushed_good = proto_stat()->good;
 
       for (pt = 0; pt < PROTO_N_POINTS; pt++) {
         const uint8_t *p = &f->payload[pt * PROTO_POINT_LEN];
@@ -1411,26 +1533,57 @@ void MainTask(void)
       }
     }
 
-    /* --- 链路监测：连续 500ms 没有新有效帧则判定断开 --- */
+    /* --- 链路监测：连续 500ms 没有新有效帧则判定断开（时间基准） --- */
     if (proto_stat()->good != last_good) {
       last_good = proto_stat()->good;
-      stall = 0;
+      last_good_tick = HAL_GetTick();
       link_ok = 1;
-    } else {
-      stall++;
-      if (stall >= 10) {          /* 10 × 50ms = 500ms */
-        link_ok = 0;
-      }
+    } else if ((uint32_t)(HAL_GetTick() - last_good_tick) >= 500) {
+      link_ok = 0;
     }
 
-    /* --- 绘制到后台缓冲，结束后整屏切换，消除闪烁 --- */
-    g_last_frame   = frame;
-    g_last_ts_ok   = ts_ok;
-    g_last_link_ok = link_ok;
-    draw_screen();
+#if defined(RX_SOURCE_UDP)
+    /* --- 以太网：物理链路刚建立时补发一次握手（上电时 link 通常还没起来） --- */
+    {
+      uint8_t up = net_udp_link_up();
 
-    frame++;
-    HAL_Delay(50);      /* 显示刷新约 20 帧/s */
+      if (up && !phy_up_prev) {
+        send_ctrl(CMD_HANDSHAKE, 0);
+      }
+      if (!up) {
+        link_ok = 0;
+      }
+      phy_up_prev = up;
+    }
+#endif
+
+    /* --- 渲染：50ms 节拍 = 20 帧/s，与数据入口解耦 ---
+       若单次绘制耗时超过 50ms，实际帧率会低于 20，屏上 FPS 会给出实测值。 */
+    if ((uint32_t)(HAL_GetTick() - last_draw) >= 50) {
+      last_draw = HAL_GetTick();
+
+      g_last_frame   = frame;
+      g_last_ts_ok   = ts_ok;
+      g_last_link_ok = link_ok;
+      draw_screen();
+
+      frame++;
+      fps_cnt++;
+    }
+
+    /* --- 每满 1 秒统计一次实际渲染帧率 --- */
+    {
+      uint32_t now = HAL_GetTick();
+
+      if ((uint32_t)(now - fps_tick) >= 1000) {
+        uint32_t dt = now - fps_tick;
+
+        g_fps = (uint8_t)((fps_cnt * 1000U) / dt);
+
+        fps_cnt  = 0;
+        fps_tick = now;
+      }
+    }
   }
 }
 

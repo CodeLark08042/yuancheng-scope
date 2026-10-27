@@ -38,12 +38,7 @@ void MX_I2C3_Init(void)
 
   /* USER CODE END I2C3_Init 1 */
   hi2c3.Instance = I2C3;
-  /* 触摸芯片 FT5336 接在 I2C3(PH7/PH8)。CubeMX 自动生成的 0x6000030D 对应
-     约 430kHz 且 SDADEL/SCLDEL 均为 0，实测读不到芯片（TS:NG）。
-     改用 ST BSP 在 STM32F746G-DISCOVERY 上验证过的手工时序值，
-     约 100kHz，数据建立/保持时间充足。见 stm32746g_discovery.h
-     中的 DISCOVERY_I2Cx_TIMING。 */
-  hi2c3.Init.Timing = 0x40912732;
+  hi2c3.Init.Timing = 0x6000030D;
   hi2c3.Init.OwnAddress1 = 0;
   hi2c3.Init.AddressingMode = I2C_ADDRESSINGMODE_7BIT;
   hi2c3.Init.DualAddressMode = I2C_DUALADDRESS_DISABLE;
@@ -70,7 +65,16 @@ void MX_I2C3_Init(void)
     Error_Handler();
   }
   /* USER CODE BEGIN I2C3_Init 2 */
-
+    /* 触摸芯片 FT5336 接在 I2C3(PH7/PH8)。CubeMX 每次生成都会把 TIMINGR 写回
+       0x6000030D（约 430kHz，SDADEL/SCLDEL 均为 0），实测在部分板子上读不到芯片。
+       这里在 HAL 初始化之后强制写回 ST BSP 验证过的手工时序值（约 100kHz，
+       数据建立/保持时间充足），避免重新生成后触摸失效。
+       注意：TIMINGR 只能在 PE=0 时写入，故先关外设再写再开。
+       对应 stm32746g_discovery.h 的 DISCOVERY_I2Cx_TIMING。 */
+    __HAL_I2C_DISABLE(&hi2c3);
+    hi2c3.Init.Timing = 0x40912732U;
+    hi2c3.Instance->TIMINGR = 0x40912732U;
+    __HAL_I2C_ENABLE(&hi2c3);
   /* USER CODE END I2C3_Init 2 */
 
 }

@@ -43,7 +43,7 @@ void MX_LTDC_Init(void)
   hltdc.Instance = LTDC;
   hltdc.Init.HSPolarity = LTDC_HSPOLARITY_AL;
   hltdc.Init.VSPolarity = LTDC_VSPOLARITY_AL;
-  hltdc.Init.DEPolarity = LTDC_DEPOLARITY_AL;   /* 与 ST BSP 一致，AH 会导致有效数据区错乱 */
+  hltdc.Init.DEPolarity = LTDC_DEPOLARITY_AL;
   hltdc.Init.PCPolarity = LTDC_PCPOLARITY_IPC;
   hltdc.Init.HorizontalSync = 40;
   hltdc.Init.VerticalSync = 9;
@@ -118,16 +118,12 @@ void HAL_LTDC_MspInit(LTDC_HandleTypeDef* ltdcHandle)
   /** Initializes the peripherals clock
   */
     PeriphClkInitStruct.PeriphClockSelection = RCC_PERIPHCLK_LTDC;
-    /* RK043FN48H 面板像素时钟必须约 9.6MHz（480x272@60Hz：565x285x60≈9.6M）。
-       依据 ST BSP stm32746g_discovery_lcd.c BSP_LCD_ClockConfig：
-       PLLSAIN=192, PLLSAIR=5, PLLSAIDivR=4 → 192/5/4 = 9.6MHz。
-       CubeMX 默认的 100/2/2=25MHz 会让面板无法锁定，表现为背光亮但全黑。 */
     PeriphClkInitStruct.PLLSAI.PLLSAIN = 192;
     PeriphClkInitStruct.PLLSAI.PLLSAIR = 5;
     PeriphClkInitStruct.PLLSAI.PLLSAIQ = 2;
     PeriphClkInitStruct.PLLSAI.PLLSAIP = RCC_PLLSAIP_DIV2;
     PeriphClkInitStruct.PLLSAIDivQ = 1;
-    PeriphClkInitStruct.PLLSAIDivR = RCC_PLLSAIDIVR_4;
+    PeriphClkInitStruct.PLLSAIDivR = RCC_PLLSAIDIVR_2;
     if (HAL_RCCEx_PeriphCLKConfig(&PeriphClkInitStruct) != HAL_OK)
     {
       Error_Handler();

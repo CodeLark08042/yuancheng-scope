@@ -7,7 +7,11 @@ define symbol __ICFEDIT_intvec_start__ = 0x08000000;
 define symbol __ICFEDIT_region_ROM_start__     = 0x08000000;
 define symbol __ICFEDIT_region_ROM_end__       = 0x080FFFFF;
 define symbol __ICFEDIT_region_RAM_start__     = 0x20000000;
-define symbol __ICFEDIT_region_RAM_end__       = 0x2004FFFF;
+/* RAM 末端收到 0x20047FFF：0x20048000 起是 lwIP 堆（MEM_SIZE=8192，见 lwipopts.h
+   的 LWIP_RAM_HEAP_POINTER），0x2004C000 起是 LWIP/Target/ethernetif.c 用
+   #pragma location 固定的 ETH DMA 描述符。这两块由 ETH 驱动独占，
+   链接器不允许在其上分配，否则 DMA 与变量会互相覆盖。 */
+define symbol __ICFEDIT_region_RAM_end__       = 0x20047FFF;
 define symbol __ICFEDIT_region_ITCMRAM_start__ = 0x00000000;
 define symbol __ICFEDIT_region_ITCMRAM_end__   = 0x00003FFF;
 /*-Sizes-*/

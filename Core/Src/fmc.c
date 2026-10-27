@@ -51,9 +51,7 @@ void MX_FMC_Init(void)
   hsdram1.Init.InternalBankNumber = FMC_SDRAM_INTERN_BANKS_NUM_4;
   hsdram1.Init.CASLatency = FMC_SDRAM_CAS_LATENCY_2;
   hsdram1.Init.WriteProtection = FMC_SDRAM_WRITE_PROTECTION_DISABLE;
-  hsdram1.Init.SDClockPeriod = FMC_SDRAM_CLOCK_PERIOD_3;   /* SDCLK = HCLK/3 = 72MHz。
-      ST BSP 仅在 HCLK=200MHz(SDCLK=100MHz) 下验证过；本工程 HCLK=216MHz，
-      用 /2 会得到 108MHz，超出 MT48LC4M32B2 在 CL2 下的 100MHz 上限，导致读写失败。 */
+  hsdram1.Init.SDClockPeriod = FMC_SDRAM_CLOCK_PERIOD_3;
   hsdram1.Init.ReadBurst = FMC_SDRAM_RBURST_ENABLE;
   hsdram1.Init.ReadPipeDelay = FMC_SDRAM_RPIPE_DELAY_0;
   /* SdramTiming */

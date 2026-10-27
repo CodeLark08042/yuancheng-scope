@@ -22,6 +22,7 @@
 #include "dma2d.h"
 #include "i2c.h"
 #include "ltdc.h"
+#include "lwip.h"
 #include "usart.h"
 #include "gpio.h"
 #include "fmc.h"
@@ -107,6 +108,7 @@ int main(void)
   MX_DMA2D_Init();
   MX_I2C3_Init();
   MX_USART6_UART_Init();
+  MX_LWIP_Init();
   /* USER CODE BEGIN 2 */
   SCB_EnableICache();
   SCB_EnableDCache();
@@ -215,6 +217,24 @@ static void MPU_Config_App(void)
   MPU_InitStruct.IsBufferable     = MPU_ACCESS_NOT_BUFFERABLE;
   HAL_MPU_ConfigRegion(&MPU_InitStruct);
 
+  /* Region 2：以太网专用区 0x20048000 起 32KB，非缓存。
+     范围覆盖：lwIP 堆（MEM_SIZE=8192 @0x20048000）与 SRAM2 里的 ETH DMA 描述符
+     （0x2004C000，见 LWIP/Target/ethernetif.c 的 #pragma location）。
+     原因：HAL_ETH_Transmit 不做 D-Cache 清理，发送缓冲来自 lwIP 堆，
+     若该区可缓存，DMA 可能读到旧数据；描述符被 DMA 读写更不能进缓存。
+     该区已从链接器 RAM 区（0x20047FFF 截止）中挖出，不会有普通变量落在这里。 */
+  MPU_InitStruct.Number           = MPU_REGION_NUMBER2;
+  MPU_InitStruct.BaseAddress      = 0x20048000;
+  MPU_InitStruct.Size             = MPU_REGION_SIZE_32KB;
+  MPU_InitStruct.SubRegionDisable = 0x00;
+  MPU_InitStruct.TypeExtField     = MPU_TEX_LEVEL1;
+  MPU_InitStruct.AccessPermission = MPU_REGION_FULL_ACCESS;
+  MPU_InitStruct.DisableExec      = MPU_INSTRUCTION_ACCESS_ENABLE;
+  MPU_InitStruct.IsShareable      = MPU_ACCESS_NOT_SHAREABLE;
+  MPU_InitStruct.IsCacheable      = MPU_ACCESS_NOT_CACHEABLE;
+  MPU_InitStruct.IsBufferable     = MPU_ACCESS_NOT_BUFFERABLE;
+  HAL_MPU_ConfigRegion(&MPU_InitStruct);
+
   HAL_MPU_Enable(MPU_PRIVILEGED_DEFAULT);
 }
 /* USER CODE END 4 */
@@ -234,7 +254,7 @@ void MPU_Config(void)
   MPU_InitStruct.Number = MPU_REGION_NUMBER0;
   MPU_InitStruct.BaseAddress = 0x0;
   MPU_InitStruct.Size = MPU_REGION_SIZE_4GB;
-  MPU_InitStruct.SubRegionDisable = 0xE7;
+  MPU_InitStruct.SubRegionDisable = 0x87;
   MPU_InitStruct.TypeExtField = MPU_TEX_LEVEL0;
   MPU_InitStruct.AccessPermission = MPU_REGION_NO_ACCESS;
   MPU_InitStruct.DisableExec = MPU_INSTRUCTION_ACCESS_DISABLE;
@@ -242,20 +262,6 @@ void MPU_Config(void)
   MPU_InitStruct.IsCacheable = MPU_ACCESS_NOT_CACHEABLE;
   MPU_InitStruct.IsBufferable = MPU_ACCESS_NOT_BUFFERABLE;
 
-  HAL_MPU_ConfigRegion(&MPU_InitStruct);
-  /* Region 1: SDRAM @0xC0000000, 32MB, 非缓存（Normal, non-cacheable）, full access
-     说明：LTDC/DMA2D 直接读物理内存，若 CPU 侧为可缓存内存，写入可能停留在 cache 里
-     导致屏上一直是旧数据（表现为全黑）。这里改为非缓存，保证 CPU 写入立即落到 SDRAM。 */
-  MPU_InitStruct.Number                = MPU_REGION_NUMBER1;
-  MPU_InitStruct.BaseAddress           = 0xC0000000;
-  MPU_InitStruct.Size                  = MPU_REGION_SIZE_32MB;
-  MPU_InitStruct.SubRegionDisable      = 0x00;
-  MPU_InitStruct.TypeExtField          = MPU_TEX_LEVEL1;
-  MPU_InitStruct.AccessPermission      = MPU_REGION_FULL_ACCESS;
-  MPU_InitStruct.DisableExec           = MPU_INSTRUCTION_ACCESS_ENABLE;
-  MPU_InitStruct.IsShareable           = MPU_ACCESS_NOT_SHAREABLE;
-  MPU_InitStruct.IsCacheable           = MPU_ACCESS_NOT_CACHEABLE;
-  MPU_InitStruct.IsBufferable          = MPU_ACCESS_NOT_BUFFERABLE;
   HAL_MPU_ConfigRegion(&MPU_InitStruct);
   /* Enables the MPU */
   HAL_MPU_Enable(MPU_PRIVILEGED_DEFAULT);
