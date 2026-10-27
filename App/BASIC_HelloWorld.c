@@ -41,7 +41,7 @@
 #define TOP_H             20          /* 顶部按钮栏高度 */
 
 #define WAVE_Y0           22          /* 模拟通道区起始 y */
-#define WAVE_H           140          /* 模拟通道区高度 */
+#define WAVE_H           130          /* 模拟通道区高度（原 140，让出 10px 给时间轴标签） */
 #define DIG_Y0           164          /* 数字通道区起始 y */
 #define DIG_LANE_H        26          /* 每路数字通道高度 */
 #define MEAS_Y0          244          /* 底部测量信息区起始 y（留 28px，两行不贴边） */
@@ -103,6 +103,17 @@ static const btn_t buttons[] = {
 
 static const char *trig_src_txt[6]  = { "OFF", "CH1", "CH2", "D1", "D2", "D3" };
 static const char *trig_mode_txt[3] = { "RISE", "FALL", "ANY" };
+
+/* ---------------- 坐标轴 ----------------
+   参照真实示波器：格子里不逐格标数字，只在边缘稀疏标注，避免小屏拥挤。
+   Y 轴固定 3 个电压值（不随档位变）；X 轴每个档位只标 首/中/尾 3 个时间值。
+--------------------------------------------------------- */
+static const char *axis_mid[5] = { "50ms", "25ms", "5ms", "2.5ms", "500us" };
+static const char *axis_end[5] = { "100ms", "50ms", "10ms", "5ms", "1ms" };
+
+#define AXIS_X_MID   222              /* 屏幕中点（10 格的中点在第 5 格线右侧） */
+#define AXIS_X_END   446              /* 右端，留 34px 给 5~6 字符标签 */
+#define AXIS_Y_XLAB  153              /* X 轴标签顶部 y，紧贴波形区底边 152 */
 
 /* ---------------- 本地状态 ---------------- */
 static uint8_t g_gear = GEAR_10MS;
@@ -520,7 +531,7 @@ static void draw_trig_indicator(void)
   GUI_SetColor(g_trig_src ? GUI_YELLOW : GUI_GRAY);
   GUI_DispStringAt("TRIG", TRIG_X0 + 4, TRIG_Y0 + 1);
   GUI_DispStringAt(trig_src_txt[g_trig_src < 6 ? g_trig_src : 0],
-                   TRIG_X0 + 28, TRIG_Y0 + 1);
+                   TRIG_X0 + 31, TRIG_Y0 + 1);
 
   if (g_trig_src == 0) {
     return;
@@ -535,6 +546,85 @@ static void draw_trig_indicator(void)
   } else {                                     /* 数字通道：只看逻辑沿 */
     GUI_DispStringAt("LOGIC", TRIG_X0 + 80, TRIG_Y0 + 1);
   }
+}
+
+/* ---------------- 触发电平线 ----------------
+   在波形区画一条虚线，高度对应触发电平；颜色跟随触发源通道。
+   数字通道作触发源时不画（协议规定电平参数对数字触发无效）。
+   触发点的时间位置不画标记：约定触发点 = 每帧第 0 点 = 每格左边缘，
+   屏上 10 个格子左边缘都是触发点，单独标一个反而误导。
+--------------------------------------------------------- */
+static void draw_trig_level(void)
+{
+  uint16_t raw, y;
+  int x;
+
+  if (g_trig_src != 1 && g_trig_src != 2) {
+    return;                     /* OFF 或数字通道：不画电平线 */
+  }
+  /* 触发源通道被关掉时，没有信号可触发，线也一并隐藏，避免被误认为波形 */
+  if ((g_trig_src == 1) && ((proto_stat()->ch_mask & MASK_CH1) == 0)) {
+    return;
+  }
+  if ((g_trig_src == 2) && ((proto_stat()->ch_mask & MASK_CH2) == 0)) {
+    return;
+  }
+
+  /* level(0~255) → ADC 码 → 屏幕 y（与波形同一映射） */
+  raw = (uint16_t)(((uint32_t)g_trig_level * 4095UL) / 255UL);
+  y   = (uint16_t)raw12_to_y(raw);
+
+  GUI_SetColor((g_trig_src == 1) ? GUI_BLUE : GUI_RED);
+  for (x = 0; x < SCR_W; x += 8) {
+    int xe = x + 3;
+    if (xe > SCR_W - 1) { xe = SCR_W - 1; }
+    GUI_DrawHLine((int)y, x, xe);
+  }
+
+  /* 右侧 T 标记：黑底保证压在波形上也读得清 */
+  {
+    int ty = (int)y - 8;
+    if (ty < WAVE_Y0) { ty = WAVE_Y0; }
+    GUI_SetBkColor(GUI_BLACK);
+    GUI_SetTextMode(GUI_TM_NORMAL);
+    GUI_SetColor((g_trig_src == 1) ? GUI_BLUE : GUI_RED);
+    GUI_DispStringAt("T", SCR_W - 48, ty);
+    GUI_DispDecAt((I32)trig_level_mv(), SCR_W - 42, ty, 4);
+    GUI_SetTextMode(GUI_TM_TRANS);
+  }
+}
+
+/* ---------------- 坐标轴标签 ----------------
+   Y 轴：3.3V / 1.6V / 0V（固定，0~3.3V 分 8 格，约 0.41V/格）
+   X 轴：0 / 中点 / 全屏时长（随档位变化）
+   全部带黑底，压在波形和栅格上也清晰。
+--------------------------------------------------------- */
+static void axis_text(int x, int y, const char *s, GUI_COLOR c)
+{
+  GUI_SetBkColor(GUI_BLACK);
+  GUI_SetTextMode(GUI_TM_NORMAL);
+  GUI_SetColor(c);
+  GUI_DispStringAt(s, x, y);
+  GUI_SetTextMode(GUI_TM_TRANS);
+}
+
+static void draw_axis(void)
+{
+  uint8_t g = proto_stat()->gear;
+
+  if (g > 4) { g = 0; }
+
+  GUI_SetFont(&GUI_Font6x8);
+
+  /* Y 轴：顶部、中部、底部 */
+  axis_text(1, WAVE_Y0 + 1,              "3.3V", GUI_YELLOW);
+  axis_text(1, WAVE_Y0 + WAVE_H / 2 - 4, "1.6V", GUI_YELLOW);
+  axis_text(1, WAVE_Y0 + WAVE_H - 8,     "0V",   GUI_YELLOW);
+
+  /* X 轴：左端 0，中点，右端全屏时长 */
+  axis_text(1, AXIS_Y_XLAB, "0", GUI_CYAN);
+  axis_text(AXIS_X_MID, AXIS_Y_XLAB, axis_mid[g], GUI_CYAN);
+  axis_text(AXIS_X_END, AXIS_Y_XLAB, axis_end[g], GUI_CYAN);
 }
 
 /* ---------------- 底部测量信息 ---------------- */
@@ -1112,6 +1202,8 @@ static void draw_screen(void)
   if (proto_stat()->ch_mask & MASK_CH1) { draw_analog(ch1, GUI_BLUE); }
   if (proto_stat()->ch_mask & MASK_CH2) { draw_analog(ch2, GUI_RED);  }
   draw_digital();
+  draw_trig_level();      /* 触发电平虚线，压在波形之上 */
+  draw_axis();            /* 坐标轴标签最后画，带黑底保证可读 */
   draw_topbar(g_last_frame, g_last_ts_ok, g_last_link_ok);
   draw_meas();
   draw_keypad();          /* 键盘弹出时覆盖在波形之上 */

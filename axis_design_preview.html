@@ -1,0 +1,320 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>坐标轴标签密度对比</title>
+<style>
+  body {
+    font-family: "Microsoft YaHei", "Segoe UI", sans-serif;
+    background: #16181c; color: #d8dde3; padding: 24px 32px; line-height: 1.6;
+  }
+  h1 { color: #4fd1c5; font-size: 22px; margin-bottom: 4px; }
+  h2 { color: #ecc94b; font-size: 17px; margin-top: 36px; border-bottom: 1px solid #333; padding-bottom: 6px; }
+  .sub { color: #8892a0; font-size: 13px; margin-bottom: 20px; }
+  .case { margin: 18px 0 30px; }
+  .screen { position: relative; width: 480px; height: 272px; background: #000;
+            border: 2px solid #3a3f47; box-shadow: 0 0 18px rgba(0,0,0,.6); }
+  .verdict { margin-top: 12px; max-width: 480px; font-size: 13.5px; }
+  .good { color: #68d391; }
+  .bad  { color: #fc8181; }
+  .tag {
+    display: inline-block; font-size: 12px; padding: 1px 8px; border-radius: 3px;
+    margin-right: 6px; vertical-align: middle;
+  }
+  .tag-a { background: #744210; color: #faf089; }
+  .tag-b { background: #22543d; color: #9ae6b4; }
+  .tag-c { background: #1a365d; color: #90cdf4; }
+  table { border-collapse: collapse; margin: 14px 0; font-size: 13px; }
+  th, td { border: 1px solid #3a3f47; padding: 7px 12px; text-align: left; }
+  th { background: #23262c; color: #ecc94b; font-weight: 600; }
+  code { background: #23262c; padding: 1px 5px; border-radius: 3px; color: #f6ad55; font-size: 12.5px; }
+  .rec { background: #1a2a1f; border-left: 3px solid #48bb78; padding: 12px 18px; margin: 16px 0; max-width: 900px; }
+  .warn { background: #2a1f1f; border-left: 3px solid #f56565; padding: 12px 18px; margin: 16px 0; max-width: 900px; }
+  ul { margin: 6px 0; padding-left: 22px; }
+</style>
+</head>
+<body>
+
+<h1>坐标轴标签密度：三种方案对比</h1>
+<p class="sub">屏幕 480×272，字体 6×8（每字 6px 宽）。波形区 y=22~162（8 格，每格 17.5px），横轴 10 格（每格 48px）。</p>
+
+<!-- ============ 方案 A ============ -->
+<div class="case">
+  <h2><span class="tag tag-a">方案 A</span>每格都标数字（我上一版给的）</h2>
+  <div class="screen">
+    <svg width="480" height="272" viewBox="0 0 480 272">
+      <!-- 顶栏 -->
+      <rect x="0" y="0" width="480" height="20" fill="#15181d"/>
+      <line x1="0" y1="20" x2="480" y2="20" stroke="#3a3f47"/>
+      <text x="6" y="14" fill="#4fd1c5" font-family="monospace" font-size="9">10ms</text>
+      <text x="60" y="14" fill="#63b3ed" font-family="monospace" font-size="9">1</text>
+      <text x="82" y="14" fill="#fc8181" font-family="monospace" font-size="9">2</text>
+      <text x="104" y="14" fill="#68d391" font-family="monospace" font-size="9">D1</text>
+
+      <!-- 栅格 -->
+      <g stroke="#2d333b" stroke-width="1">
+        <line x1="0"   y1="22" x2="0"   y2="162"/>
+        <line x1="48"  y1="22" x2="48"  y2="162"/>
+        <line x1="96"  y1="22" x2="96"  y2="162"/>
+        <line x1="144" y1="22" x2="144" y2="162"/>
+        <line x1="192" y1="22" x2="192" y2="162"/>
+        <line x1="240" y1="22" x2="240" y2="162"/>
+        <line x1="288" y1="22" x2="288" y2="162"/>
+        <line x1="336" y1="22" x2="336" y2="162"/>
+        <line x1="384" y1="22" x2="384" y2="162"/>
+        <line x1="432" y1="22" x2="432" y2="162"/>
+        <line x1="479" y1="22" x2="479" y2="162"/>
+        <line x1="0" y1="22"    x2="480" y2="22"/>
+        <line x1="0" y1="39.5"  x2="480" y2="39.5"/>
+        <line x1="0" y1="57"    x2="480" y2="57"/>
+        <line x1="0" y1="74.5"  x2="480" y2="74.5"/>
+        <line x1="0" y1="92"    x2="480" y2="92"/>
+        <line x1="0" y1="109.5" x2="480" y2="109.5"/>
+        <line x1="0" y1="127"   x2="480" y2="127"/>
+        <line x1="0" y1="144.5" x2="480" y2="144.5"/>
+        <line x1="0" y1="162"   x2="480" y2="162"/>
+      </g>
+
+      <!-- 波形 -->
+      <path d="M0,92 Q24,52 48,92 T96,92 T144,92 T192,92 T240,92 T288,92 T336,92 T384,92 T432,92 T479,92"
+            fill="none" stroke="#4299e1" stroke-width="1.5"/>
+
+      <!-- 数字通道泳道 -->
+      <g stroke="#2d333b" stroke-width="1">
+        <line x1="0" y1="190" x2="480" y2="190"/>
+        <line x1="0" y1="216" x2="480" y2="216"/>
+      </g>
+      <path d="M0,208 L40,208 L40,170 L88,170 L88,208 L136,208 L136,170 L184,170 L184,208 L232,208 L232,170 L280,170 L280,208 L328,208 L328,170 L376,170 L376,208 L424,208 L424,170 L479,170"
+            fill="none" stroke="#68d391" stroke-width="1.5"/>
+
+      <!-- Y 轴密集标签 -->
+      <g fill="#d69e2e" font-family="monospace" font-size="8">
+        <text x="1" y="26">3.3V</text>
+        <text x="1" y="61">2.5V</text>
+        <text x="1" y="96">1.6V</text>
+        <text x="1" y="131">0.8V</text>
+        <text x="1" y="160">0V</text>
+      </g>
+
+      <!-- X 轴密集标签 -->
+      <g fill="#38b2ac" font-family="monospace" font-size="8">
+        <text x="1"   y="171">0</text>
+        <text x="38"  y="171">10ms</text>
+        <text x="86"  y="171">20ms</text>
+        <text x="134" y="171">30ms</text>
+        <text x="182" y="171">40ms</text>
+        <text x="230" y="171">50ms</text>
+        <text x="278" y="171">60ms</text>
+        <text x="326" y="171">70ms</text>
+        <text x="374" y="171">80ms</text>
+        <text x="422" y="171">90ms</text>
+      </g>
+
+      <!-- 底部测量 -->
+      <text x="4" y="254" fill="#4299e1" font-family="monospace" font-size="9">1:1650mV 1kHz</text>
+      <text x="136" y="254" fill="#fc8181" font-family="monospace" font-size="9">2:--- OFF ---</text>
+      <text x="4" y="266" fill="#68d391" font-family="monospace" font-size="9">D1:1kHz 500us</text>
+    </svg>
+  </div>
+  <div class="verdict">
+    <span class="bad">问题：</span>文字直接压在栅格里，波形和数字通道都被数字干扰；
+    10ms 档时底部标签已经开始互相挤压（每格仅 48px，而 <code>10ms</code> 占 24px + 间隔）；
+    500us 档会出现 <code>1.5ms</code> 这种 5 字符标签，必然重叠。
+    <br><span class="bad">结论：</span>小屏上信息过载，观感最差。
+  </div>
+</div>
+
+<!-- ============ 方案 B ============ -->
+<div class="case">
+  <h2><span class="tag tag-b">方案 B</span>真实示波器风格：只给 V/div 和 s/div</h2>
+  <div class="screen">
+    <svg width="480" height="272" viewBox="0 0 480 272">
+      <rect x="0" y="0" width="480" height="20" fill="#15181d"/>
+      <line x1="0" y1="20" x2="480" y2="20" stroke="#3a3f47"/>
+      <text x="6" y="14" fill="#4fd1c5" font-family="monospace" font-size="9">10ms</text>
+      <text x="60" y="14" fill="#63b3ed" font-family="monospace" font-size="9">1</text>
+      <text x="82" y="14" fill="#fc8181" font-family="monospace" font-size="9">2</text>
+      <text x="104" y="14" fill="#68d391" font-family="monospace" font-size="9">D1</text>
+
+      <g stroke="#2d333b" stroke-width="1">
+        <line x1="0"   y1="22" x2="0"   y2="162"/>
+        <line x1="48"  y1="22" x2="48"  y2="162"/>
+        <line x1="96"  y1="22" x2="96"  y2="162"/>
+        <line x1="144" y1="22" x2="144" y2="162"/>
+        <line x1="192" y1="22" x2="192" y2="162"/>
+        <line x1="240" y1="22" x2="240" y2="162"/>
+        <line x1="288" y1="22" x2="288" y2="162"/>
+        <line x1="336" y1="22" x2="336" y2="162"/>
+        <line x1="384" y1="22" x2="384" y2="162"/>
+        <line x1="432" y1="22" x2="432" y2="162"/>
+        <line x1="479" y1="22" x2="479" y2="162"/>
+        <line x1="0" y1="22"    x2="480" y2="22"/>
+        <line x1="0" y1="39.5"  x2="480" y2="39.5"/>
+        <line x1="0" y1="57"    x2="480" y2="57"/>
+        <line x1="0" y1="74.5"  x2="480" y2="74.5"/>
+        <line x1="0" y1="92"    x2="480" y2="92"/>
+        <line x1="0" y1="109.5" x2="480" y2="109.5"/>
+        <line x1="0" y1="127"   x2="480" y2="127"/>
+        <line x1="0" y1="144.5" x2="480" y2="144.5"/>
+        <line x1="0" y1="162"   x2="480" y2="162"/>
+      </g>
+
+      <path d="M0,92 Q24,52 48,92 T96,92 T144,92 T192,92 T240,92 T288,92 T336,92 T384,92 T432,92 T479,92"
+            fill="none" stroke="#4299e1" stroke-width="1.5"/>
+
+      <!-- 0V 基准标记：左边缘小箭头 -->
+      <path d="M0,162 L8,162 L4,157 Z" fill="#d69e2e"/>
+      <text x="12" y="166" fill="#d69e2e" font-family="monospace" font-size="8">0</text>
+
+      <!-- 触发点标记：右边缘 T 箭头 -->
+      <path d="M472,92 L479,92 L476,87 Z" fill="#ed64a6"/>
+      <text x="462" y="90" fill="#ed64a6" font-family="monospace" font-size="8">T</text>
+
+      <g stroke="#2d333b" stroke-width="1">
+        <line x1="0" y1="190" x2="480" y2="190"/>
+        <line x1="0" y1="216" x2="480" y2="216"/>
+      </g>
+      <path d="M0,208 L40,208 L40,170 L88,170 L88,208 L136,208 L136,170 L184,170 L184,208 L232,208 L232,170 L280,170 L280,208 L328,208 L328,170 L376,170 L376,208 L424,208 L424,170 L479,170"
+            fill="none" stroke="#68d391" stroke-width="1.5"/>
+
+      <!-- 左侧下方：量程说明 -->
+      <text x="2" y="176" fill="#d69e2e" font-family="monospace" font-size="8">0.41V/div</text>
+
+      <!-- 底部右侧：时基说明 -->
+      <text x="410" y="176" fill="#38b2ac" font-family="monospace" font-size="8">10ms/div</text>
+
+      <text x="4" y="254" fill="#4299e1" font-family="monospace" font-size="9">1:1650mV 1kHz</text>
+      <text x="136" y="254" fill="#fc8181" font-family="monospace" font-size="9">2:--- OFF ---</text>
+      <text x="4" y="266" fill="#68d391" font-family="monospace" font-size="9">D1:1kHz 500us</text>
+    </svg>
+  </div>
+  <div class="verdict">
+    <span class="good">优点：</span>最接近真实示波器（Rigol/Tek 都是这个思路）。波形区完全干净，只看格数×量程；
+    0V 基准箭头和触发点 T 标记是示波器的标准符号，专业感强。
+    <br><span class="bad">缺点：</span>要自己数格子乘 0.41，对非专业观众不友好；答辩时老师可能问"这个波形多少伏"，
+    你还要口算。
+  </div>
+</div>
+
+<!-- ============ 方案 C ============ -->
+<div class="case">
+  <h2><span class="tag tag-c">方案 C</span>稀疏标签：首尾 + 中间各一个（推荐）</h2>
+  <p class="sub" style="margin-top:-6px">含触发电平虚线：颜色跟随触发源通道（此处 CH1 蓝），右侧标 <code>T1.65V</code>。</p>
+  <div class="screen">
+    <svg width="480" height="272" viewBox="0 0 480 272">
+      <rect x="0" y="0" width="480" height="20" fill="#15181d"/>
+      <line x1="0" y1="20" x2="480" y2="20" stroke="#3a3f47"/>
+      <text x="6" y="14" fill="#4fd1c5" font-family="monospace" font-size="9">10ms</text>
+      <text x="60" y="14" fill="#63b3ed" font-family="monospace" font-size="9">1</text>
+      <text x="82" y="14" fill="#fc8181" font-family="monospace" font-size="9">2</text>
+      <text x="104" y="14" fill="#68d391" font-family="monospace" font-size="9">D1</text>
+
+      <g stroke="#2d333b" stroke-width="1">
+        <line x1="0"   y1="22" x2="0"   y2="162"/>
+        <line x1="48"  y1="22" x2="48"  y2="162"/>
+        <line x1="96"  y1="22" x2="96"  y2="162"/>
+        <line x1="144" y1="22" x2="144" y2="162"/>
+        <line x1="192" y1="22" x2="192" y2="162"/>
+        <line x1="240" y1="22" x2="240" y2="162"/>
+        <line x1="288" y1="22" x2="288" y2="162"/>
+        <line x1="336" y1="22" x2="336" y2="162"/>
+        <line x1="384" y1="22" x2="384" y2="162"/>
+        <line x1="432" y1="22" x2="432" y2="162"/>
+        <line x1="479" y1="22" x2="479" y2="162"/>
+        <line x1="0" y1="22"    x2="480" y2="22"/>
+        <line x1="0" y1="39.5"  x2="480" y2="39.5"/>
+        <line x1="0" y1="57"    x2="480" y2="57"/>
+        <line x1="0" y1="74.5"  x2="480" y2="74.5"/>
+        <line x1="0" y1="92"    x2="480" y2="92"/>
+        <line x1="0" y1="109.5" x2="480" y2="109.5"/>
+        <line x1="0" y1="127"   x2="480" y2="127"/>
+        <line x1="0" y1="144.5" x2="480" y2="144.5"/>
+        <line x1="0" y1="162"   x2="480" y2="162"/>
+      </g>
+
+      <path d="M0,92 Q24,52 48,92 T96,92 T144,92 T192,92 T240,92 T288,92 T336,92 T384,92 T432,92 T479,92"
+            fill="none" stroke="#4299e1" stroke-width="1.5"/>
+
+      <!-- Y 轴：只标 3 个（顶/中/底），且带深色描边保证可读 -->
+      <g font-family="monospace" font-size="8">
+        <text x="1" y="26"  fill="#d69e2e">3.3V</text>
+        <text x="1" y="96"  fill="#d69e2e">1.6V</text>
+        <text x="1" y="160" fill="#d69e2e">0V</text>
+      </g>
+
+      <!-- X 轴：只标 3 个（首/中/尾） -->
+      <g font-family="monospace" font-size="8">
+        <text x="1"   y="171" fill="#38b2ac">0</text>
+        <text x="222" y="171" fill="#38b2ac">50ms</text>
+        <text x="446" y="171" fill="#38b2ac">100ms</text>
+      </g>
+
+      <!-- 触发电平虚线（源 = CH1 时用 CH1 的蓝色） -->
+      <line x1="0" y1="92" x2="479" y2="92"
+            stroke="#4299e1" stroke-width="1" stroke-dasharray="4 4"/>
+      <rect x="412" y="85" width="68" height="9" fill="#000"/>
+      <text x="414" y="92" fill="#4299e1" font-family="monospace" font-size="8">T1.65V</text>
+
+      <g stroke="#2d333b" stroke-width="1">
+        <line x1="0" y1="190" x2="480" y2="190"/>
+        <line x1="0" y1="216" x2="480" y2="216"/>
+      </g>
+      <path d="M0,208 L40,208 L40,170 L88,170 L88,208 L136,208 L136,170 L184,170 L184,208 L232,208 L232,170 L280,170 L280,208 L328,208 L328,170 L376,170 L376,208 L424,208 L424,170 L479,170"
+            fill="none" stroke="#68d391" stroke-width="1.5"/>
+
+      <text x="4" y="254" fill="#4299e1" font-family="monospace" font-size="9">1:1650mV 1kHz</text>
+      <text x="136" y="254" fill="#fc8181" font-family="monospace" font-size="9">2:--- OFF ---</text>
+      <text x="4" y="266" fill="#68d391" font-family="monospace" font-size="9">D1:1kHz 500us</text>
+    </svg>
+  </div>
+  <div class="verdict">
+    <span class="good">优点：</span>量程一眼可见（3.3V / 1.6V / 0V，100ms 跨度），文字极稀疏不挡波形；
+    最左/最右贴边放，波形中间完全干净；比方案 B 更好读，比方案 A 更干净。
+    <br><span class="good">触发：</span>触发电平画成虚线横线，颜色跟随触发源（CH1 蓝 / CH2 红），
+    右侧标 <code>T1.65V</code>；数字通道作触发源时不画线（协议规定电平对数字触发无效）。
+    <br><span class="good">成本：</span>6 个 <code>GUI_DispStringAt</code> + 一条虚线循环 + 每个档位一组字符串常量，约 45 行。
+  </div>
+</div>
+
+<h2>三种方案对比</h2>
+<table>
+  <tr>
+    <th>维度</th><th><span class="tag tag-a">A 密集</span></th><th><span class="tag tag-b">B 示波器式</span></th><th><span class="tag tag-c">C 稀疏</span></th>
+  </tr>
+  <tr><td>波形遮挡</td><td class="bad">明显</td><td class="good">几乎没有</td><td class="good">几乎没有</td></tr>
+  <tr><td>能否直读电压</td><td class="good">能</td><td class="bad">需自己乘 V/div</td><td class="good">能估读</td></tr>
+  <tr><td>能否直读时间</td><td class="good">能</td><td class="bad">需自己乘 s/div</td><td class="good">能估读</td></tr>
+  <tr><td>专业感</td><td class="bad">像调试界面</td><td class="good">最像真机</td><td>尚可</td></tr>
+  <tr><td>小屏拥挤风险</td><td class="bad">100us 档必然重叠</td><td class="good">无</td><td class="good">无</td></tr>
+  <tr><td>实现工作量</td><td>约 60 行</td><td>约 45 行</td><td>约 30 行</td></tr>
+</table>
+
+<div class="rec">
+  <strong>推荐方案 C（稀疏标签）</strong>，理由：
+  <ul>
+    <li>每个档位只在「首 / 中 / 尾」标 3 个时间值，绝不会重叠，与档位切换天然配合；</li>
+    <li>Y 轴固定 3 个电压值（3.3V / 1.6V / 0V），不随档位变化，代码最简单；</li>
+    <li>文字全部贴边（x≤2 或 x≥446），不侵入波形区，观感与现在几乎一致；</li>
+    <li>若之后想更接近真机，在方案 C 基础上再加一个 0V 基准箭头和触发点 T 标记即可（+10 行）。</li>
+  </ul>
+</div>
+
+<div class="warn">
+  <strong>关于任务书：</strong>没有任何一条明确要求坐标轴标签（我核对过 V1.0 全文）。
+  但「测量电压范围不少于 0~3V」「扫描时间五档可调」这两条隐含了「刻度必须可判读」的意图。
+  坐标轴属于加分项，不是硬性验收点——时间紧张时可以最后做。
+</div>
+
+<h2>各档位下的 X 轴标签（方案 C）</h2>
+<table>
+  <tr><th>档位</th><th>每格</th><th>全屏</th><th>左侧</th><th>中间</th><th>右侧</th></tr>
+  <tr><td>10ms</td><td>10 ms</td><td>100 ms</td><td>0</td><td>50ms</td><td>100ms</td></tr>
+  <tr><td>5ms</td><td>5 ms</td><td>50 ms</td><td>0</td><td>25ms</td><td>50ms</td></tr>
+  <tr><td>1ms</td><td>1 ms</td><td>10 ms</td><td>0</td><td>5ms</td><td>10ms</td></tr>
+  <tr><td>500us</td><td>500 µs</td><td>5 ms</td><td>0</td><td>2.5ms</td><td>5ms</td></tr>
+  <tr><td>100us</td><td>100 µs</td><td>1 ms</td><td>0</td><td>500us</td><td>1ms</td></tr>
+</table>
+<p class="sub">中间与右侧标签最长 6 字符（36px），中间值放 x=222，右侧放 x=446，均不超出屏幕。</p>
+
+</body>
+</html>
