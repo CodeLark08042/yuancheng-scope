@@ -74,11 +74,47 @@ static const btn_t buttons[] = {
 };
 #define BTN_NUM   (sizeof(buttons) / sizeof(buttons[0]))
 
+/* ---------------- 触发设置 ----------------
+   与 A 板的约定：触发点固定在每帧第 0 个采样点（屏上为每格左边缘），
+   预触发深度 0；500ms 内无触发时 A 板自动转自由运行。
+   显示端只负责下发配置和显示 A 板的回执。
+--------------------------------------------------------- */
+#define TRIG_X0     252                 /* 底部测量行右侧的指示区 */
+#define TRIG_X1     474
+#define TRIG_Y0     (MEAS_Y0 - 1)
+#define TRIG_Y1     (MEAS_Y0 + 9)
+
+#define TG_X0        60                 /* 设置面板 */
+#define TG_Y0        40
+#define TG_X1       420
+#define TG_Y1       232
+#define TG_ROW1_Y    76
+#define TG_ROW2_Y   112
+#define TG_ROW3_Y   148
+#define TG_ROW_H     30
+#define TG_VALUE_X  160
+#define TG_VALUE_W  150
+#define TG_ADJ_W     40
+#define TG_MINUS_X  316
+#define TG_PLUS_X   372
+#define TG_CLOSE_X  170
+#define TG_CLOSE_Y  184
+#define TG_CLOSE_W  140
+
+static const char *trig_src_txt[6]  = { "OFF", "CH1", "CH2", "D1", "D2", "D3" };
+static const char *trig_mode_txt[3] = { "RISE", "FALL", "ANY" };
+
 /* ---------------- 本地状态 ---------------- */
 static uint8_t g_gear = GEAR_10MS;
 static uint8_t g_mask = MASK_CH1 | MASK_CH2 | MASK_D1 | MASK_D2 | MASK_D3;
 static uint8_t g_touch_down = 0;
 static uint16_t g_wave_freq = 1000;     /* 矩形波频率（Hz），默认 1kHz，范围 100~10000 */
+
+/* ---- 触发设置（本地值；收到 A 板状态帧后以其回执为准） ---- */
+static uint8_t g_trig_src   = 0;        /* 0=OFF 1=CH1 2=CH2 3=D1 4=D2 5=D3 */
+static uint8_t g_trig_mode  = 0;        /* 0=上升沿 1=下降沿 2=任意边沿 */
+static uint8_t g_trig_level = 128;      /* 0~255，线性映射 0~VREF */
+static uint8_t g_trig_open  = 0;        /* 触发设置面板是否弹出 */
 
 /* ---- 数字键盘状态 ---- */
 static uint8_t g_kp_open = 0;           /* 键盘是否弹出 */
@@ -158,6 +194,22 @@ static uint32_t cur_dt_us(void)
   return (g < 5) ? dt_us_tab[g] : dt_us_tab[0];
 }
 
+#ifndef RX_SOURCE_UART
+/* 假数据源模式：没有 A 板，直接伪造一帧状态帧，让触发面板能看到回执。
+   真实 UART 模式下由 A 板按协议回状态帧。 */
+static void fake_status_reply(void)
+{
+  uint8_t  buf[PROTO_STATUS_LEN];
+  uint16_t i;
+
+  proto_build_status(buf, g_gear, g_mask, g_trig_src, g_trig_mode,
+                     g_trig_level, g_wave_freq);
+  for (i = 0; i < PROTO_STATUS_LEN; i++) {
+    proto_feed(buf[i]);
+  }
+}
+#endif
+
 /* ---------------- 控制帧下发 ---------------- */
 static void send_ctrl(uint8_t cmd, uint16_t param)
 {
@@ -165,6 +217,10 @@ static void send_ctrl(uint8_t cmd, uint16_t param)
 
   proto_build_ctrl(buf, cmd, param);
   HAL_UART_Transmit(&huart6, buf, PROTO_CTRL_LEN, 20);
+
+#ifndef RX_SOURCE_UART
+  fake_status_reply();        /* 自测模式：模拟 A 板回执 */
+#endif
 }
 
 /* ---------------- 测量 ----------------
@@ -438,6 +494,49 @@ static void draw_topbar(uint32_t frame, uint8_t ts_ok, uint8_t link_ok)
 #endif
 }
 
+/* ---------------- 触发指示 ----------------
+   底部测量行右侧显示当前触发配置；边框绿色表示 A 板已回执确认，
+   灰色表示只是本地设置（A 板还没回状态帧）。
+--------------------------------------------------------- */
+static uint16_t trig_level_mv(void)
+{
+  return (uint16_t)(((uint32_t)g_trig_level * 3300UL) / 255UL);
+}
+
+static void draw_trig_indicator(void)
+{
+  const proto_status_t *st = proto_status();
+  uint8_t confirmed = (uint8_t)(st->valid &&
+                                st->trig_src   == g_trig_src &&
+                                st->trig_mode  == g_trig_mode &&
+                                st->trig_level == g_trig_level);
+
+  GUI_SetFont(&GUI_Font6x8);
+  GUI_SetTextMode(GUI_TM_TRANS);
+
+  GUI_SetColor(confirmed ? GUI_GREEN : GUI_DARKGRAY);
+  GUI_DrawRect(TRIG_X0, TRIG_Y0, TRIG_X1, TRIG_Y1);
+
+  GUI_SetColor(g_trig_src ? GUI_YELLOW : GUI_GRAY);
+  GUI_DispStringAt("TRIG", TRIG_X0 + 4, TRIG_Y0 + 1);
+  GUI_DispStringAt(trig_src_txt[g_trig_src < 6 ? g_trig_src : 0],
+                   TRIG_X0 + 28, TRIG_Y0 + 1);
+
+  if (g_trig_src == 0) {
+    return;
+  }
+
+  GUI_DispStringAt(trig_mode_txt[g_trig_mode < 3 ? g_trig_mode : 0],
+                   TRIG_X0 + 50, TRIG_Y0 + 1);
+
+  if (g_trig_src <= 2) {                       /* 模拟通道：显示电平 */
+    GUI_DispDecAt((I32)trig_level_mv(), TRIG_X0 + 80, TRIG_Y0 + 1, 4);
+    GUI_DispStringAt("mV", TRIG_X0 + 106, TRIG_Y0 + 1);
+  } else {                                     /* 数字通道：只看逻辑沿 */
+    GUI_DispStringAt("LOGIC", TRIG_X0 + 80, TRIG_Y0 + 1);
+  }
+}
+
 /* ---------------- 底部测量信息 ---------------- */
 static void draw_meas(void)
 {
@@ -449,6 +548,8 @@ static void draw_meas(void)
 
   GUI_SetFont(&GUI_Font6x8);
   GUI_SetTextMode(GUI_TM_TRANS);
+
+  draw_trig_indicator();        /* 数据未就绪时也要能配置触发 */
 
   if (proto_stat()->good < 12) {
     GUI_SetColor(GUI_GRAY);
@@ -684,6 +785,113 @@ static uint8_t handle_keypad_tap(uint16_t x, uint16_t y)
   return 1;
 }
 
+/* ---------------- 触发设置面板 ----------------
+   点击底部右侧触发指示区弹出；点面板外或 CLOSE 关闭。
+   每次修改立即下发对应命令（0x03/0x04/0x05），并由 A 板状态帧回执确认。
+--------------------------------------------------------- */
+static void draw_trig_panel(void)
+{
+  int y;
+
+  if (!g_trig_open) {
+    return;
+  }
+
+  GUI_SetColor(GUI_LIGHTGRAY);
+  GUI_FillRect(TG_X0, TG_Y0, TG_X1, TG_Y1);
+  GUI_SetColor(GUI_WHITE);
+  GUI_DrawRect(TG_X0, TG_Y0, TG_X1, TG_Y1);
+  GUI_DrawRect(TG_X0 + 1, TG_Y0 + 1, TG_X1 - 1, TG_Y1 - 1);
+
+  GUI_SetFont(&GUI_Font8x16);
+  GUI_SetTextMode(GUI_TM_TRANS);
+  GUI_SetColor(GUI_BLACK);
+  GUI_DispStringAt("Trigger Setting", TG_X0 + 12, TG_Y0 + 8);
+
+  /* 行 1：触发源（点击循环切换） */
+  y = TG_ROW1_Y;
+  GUI_SetColor(GUI_BLACK);
+  GUI_DispStringAt("Source", TG_X0 + 14, y + 8);
+  draw_key(TG_VALUE_X, y, TG_VALUE_X + TG_VALUE_W, y + TG_ROW_H,
+           trig_src_txt[g_trig_src < 6 ? g_trig_src : 0],
+           g_trig_src ? GUI_YELLOW : GUI_WHITE);
+
+  /* 行 2：触发方式 */
+  y = TG_ROW2_Y;
+  GUI_SetColor(GUI_BLACK);
+  GUI_DispStringAt("Mode", TG_X0 + 14, y + 8);
+  draw_key(TG_VALUE_X, y, TG_VALUE_X + TG_VALUE_W, y + TG_ROW_H,
+           trig_mode_txt[g_trig_mode < 3 ? g_trig_mode : 0], GUI_CYAN);
+
+  /* 行 3：触发电平（数字触发源时该参数被 A 板忽略） */
+  y = TG_ROW3_Y;
+  GUI_SetColor(GUI_BLACK);
+  GUI_DispStringAt("Level", TG_X0 + 14, y + 8);
+  GUI_SetColor(GUI_WHITE);
+  GUI_DispDecAt((I32)trig_level_mv(), TG_VALUE_X, y + 8, 4);
+  GUI_SetColor(GUI_BLACK);
+  GUI_DispStringAt("mV", TG_VALUE_X + 40, y + 8);
+
+  draw_key(TG_MINUS_X, y, TG_MINUS_X + TG_ADJ_W, y + TG_ROW_H, "-", GUI_LIGHTGRAY);
+  draw_key(TG_PLUS_X,  y, TG_PLUS_X  + TG_ADJ_W, y + TG_ROW_H, "+", GUI_LIGHTGRAY);
+
+  GUI_SetFont(&GUI_Font6x8);
+  GUI_SetColor(GUI_DARKGRAY);
+  GUI_DispStringAt("Trigger point = left edge of each grid (pre-trigger 0)",
+                   TG_X0 + 12, TG_Y1 - 14);
+
+  draw_key(TG_CLOSE_X, TG_CLOSE_Y, TG_CLOSE_X + TG_CLOSE_W, TG_CLOSE_Y + 26,
+           "CLOSE", GUI_GREEN);
+}
+
+static uint8_t handle_trig_tap(uint16_t x, uint16_t y)
+{
+  /* 面板范围外：关闭 */
+  if (x < TG_X0 || x > TG_X1 || y < TG_Y0 || y > TG_Y1) {
+    g_trig_open = 0;
+    return 1;
+  }
+
+  /* 行 1：触发源 */
+  if (y >= TG_ROW1_Y && y <= TG_ROW1_Y + TG_ROW_H &&
+      x >= TG_VALUE_X && x <= TG_VALUE_X + TG_VALUE_W) {
+    g_trig_src = (uint8_t)((g_trig_src + 1) % 6);
+    send_ctrl(CMD_TRIG_SRC, g_trig_src);
+    return 1;
+  }
+
+  /* 行 2：触发方式 */
+  if (y >= TG_ROW2_Y && y <= TG_ROW2_Y + TG_ROW_H &&
+      x >= TG_VALUE_X && x <= TG_VALUE_X + TG_VALUE_W) {
+    g_trig_mode = (uint8_t)((g_trig_mode + 1) % 3);
+    send_ctrl(CMD_TRIG_MODE, g_trig_mode);
+    return 1;
+  }
+
+  /* 行 3：触发电平 - / +（步进 16 ≈ 0.21V） */
+  if (y >= TG_ROW3_Y && y <= TG_ROW3_Y + TG_ROW_H) {
+    if (x >= TG_MINUS_X && x <= TG_MINUS_X + TG_ADJ_W) {
+      g_trig_level = (uint8_t)((g_trig_level >= 16) ? (g_trig_level - 16) : 0);
+      send_ctrl(CMD_TRIG_LEVEL, g_trig_level);
+      return 1;
+    }
+    if (x >= TG_PLUS_X && x <= TG_PLUS_X + TG_ADJ_W) {
+      g_trig_level = (uint8_t)((g_trig_level <= 239) ? (g_trig_level + 16) : 255);
+      send_ctrl(CMD_TRIG_LEVEL, g_trig_level);
+      return 1;
+    }
+  }
+
+  /* CLOSE */
+  if (y >= TG_CLOSE_Y && y <= TG_CLOSE_Y + 26 &&
+      x >= TG_CLOSE_X && x <= TG_CLOSE_X + TG_CLOSE_W) {
+    g_trig_open = 0;
+    return 1;
+  }
+
+  return 1;
+}
+
 /* ---------------- 导出菜单 ----------------
    点击顶栏 SAVE 弹出，选择导出 CSV 或 BMP。
    导出数据经 USART1（ST-Link 虚拟串口）发到 PC。
@@ -827,8 +1035,19 @@ static void handle_tap(uint16_t x, uint16_t y)
     return;
   }
 
+  /* 触发设置面板弹出时，所有触摸都交给面板 */
+  if (g_trig_open) {
+    (void)handle_trig_tap(x, y);
+    return;
+  }
+
   if (y > TOP_H) {
-    return;                 /* 只有顶部按钮区响应 */
+    /* 底部右侧触发指示区：点击打开设置面板，并请求 A 板上报当前状态 */
+    if (x >= TRIG_X0 && x <= TRIG_X1 && y >= TRIG_Y0 && y <= TRIG_Y1) {
+      g_trig_open = 1;
+      send_ctrl(CMD_HANDSHAKE, 0);
+    }
+    return;                 /* 其余区域只有顶部按钮区响应 */
   }
 
   for (i = 0; i < BTN_NUM; i++) {
@@ -897,6 +1116,7 @@ static void draw_screen(void)
   draw_meas();
   draw_keypad();          /* 键盘弹出时覆盖在波形之上 */
   draw_menu();            /* 导出菜单弹出时覆盖在最上层 */
+  draw_trig_panel();      /* 触发设置面板 */
 
   GUI_MULTIBUF_End();
 }
@@ -915,6 +1135,7 @@ void MainTask(void)
   uint8_t  ts_ok;
   uint8_t  key_prev = 0;
   uint32_t last_good = 0;
+  uint32_t last_status = 0;
   uint32_t stall = 0;
   uint8_t  link_ok = 1;
 
@@ -927,6 +1148,9 @@ void MainTask(void)
 #endif
   ts_ok = touch_init();
   log_uart_init();        /* USART1 经 ST-Link 虚拟串口，用于导出文件到 PC */
+
+  /* 上电握手：请求 A 板上报当前档位/通道/触发配置（自测模式会立刻伪造回执） */
+  send_ctrl(CMD_HANDSHAKE, 0);
 
   /* 板载按键 B1 = PI11：下拉输入，按下接 VDD 为高电平。
      作为触摸之外的备用档位切换手段（任务书允许按键调节）。 */
@@ -971,6 +1195,14 @@ void MainTask(void)
       proto_feed(frame_buf[i]);
     }
 #endif
+
+    /* --- A 板状态帧回执：以其为准同步触发配置 --- */
+    if (proto_status()->valid && proto_status()->count != last_status) {
+      last_status  = proto_status()->count;
+      g_trig_src   = proto_status()->trig_src;
+      g_trig_mode  = proto_status()->trig_mode;
+      g_trig_level = proto_status()->trig_level;
+    }
 
     /* --- 有新帧 → 50 点灌入环形缓冲 --- */
     if (proto_frame_ready()) {

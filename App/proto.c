@@ -17,6 +17,7 @@ typedef enum {
 
 static proto_frame_t g_frame;
 static proto_stat_t  g_stat;
+static proto_status_t g_status;
 static proto_state_t g_state = ST_HEAD0;
 static uint8_t       g_rxbuf[PROTO_DATA_LEN];
 static uint16_t      g_len;      /* 当前帧已收字节数 */
@@ -104,8 +105,19 @@ static void frame_complete(void)
     }
     g_stat.gear    = g_frame.gear;
     g_stat.ch_mask = g_frame.ch_mask;
+  } else if (type == PROTO_TYPE_STATUS) {
+    /* A 板回执：记录当前档位、通道、触发配置和矩形波频率 */
+    g_status.gear       = g_rxbuf[OFS_ST_GEAR];
+    g_status.ch_mask    = g_rxbuf[OFS_ST_CH_MASK];
+    g_status.trig_src   = g_rxbuf[OFS_ST_TRIG_SRC];
+    g_status.trig_mode  = g_rxbuf[OFS_ST_TRIG_MODE];
+    g_status.trig_level = g_rxbuf[OFS_ST_TRIG_LEVEL];
+    g_status.wave_freq  = (uint16_t)(g_rxbuf[OFS_ST_FREQ_L] |
+                                     ((uint16_t)g_rxbuf[OFS_ST_FREQ_H] << 8));
+    g_status.valid = 1;
+    g_status.count++;
   }
-  /* 控制帧 / 状态帧：显示端目前不主动推送，暂只计数/忽略内容 */
+  /* 控制帧：显示端不接收，忽略 */
 }
 
 /* ---------------- API ---------------- */
@@ -120,6 +132,8 @@ void proto_reset(void)
   g_stat.crc_err = 0;
   g_stat.drop   = 0;
   g_stat.last_seq = 0;
+  g_status.valid = 0;
+  g_status.count = 0;
 }
 
 void proto_feed(uint8_t b)
@@ -184,6 +198,11 @@ proto_stat_t *proto_stat(void)
   return &g_stat;
 }
 
+const proto_status_t *proto_status(void)
+{
+  return &g_status;
+}
+
 /* 组一帧控制帧（B→A），返回总长（固定 9） */
 uint16_t proto_build_ctrl(uint8_t *out, uint8_t cmd, uint16_t param)
 {
@@ -200,6 +219,30 @@ uint16_t proto_build_ctrl(uint8_t *out, uint8_t cmd, uint16_t param)
   out[7] = (uint8_t)(crc & 0xFF);
   out[8] = (uint8_t)((crc >> 8) & 0xFF);
   return PROTO_CTRL_LEN;
+}
+
+/* 组一帧状态帧（A 板用 / 假数据源自测），返回总长（固定 12） */
+uint16_t proto_build_status(uint8_t *out, uint8_t gear, uint8_t ch_mask,
+                            uint8_t trig_src, uint8_t trig_mode, uint8_t trig_level,
+                            uint16_t wave_freq)
+{
+  uint16_t crc;
+
+  out[0] = PROTO_HEAD0;
+  out[1] = PROTO_HEAD1;
+  out[2] = PROTO_TYPE_STATUS;
+  out[OFS_ST_GEAR]       = gear;
+  out[OFS_ST_CH_MASK]    = ch_mask;
+  out[OFS_ST_TRIG_SRC]   = trig_src;
+  out[OFS_ST_TRIG_MODE]  = trig_mode;
+  out[OFS_ST_TRIG_LEVEL] = trig_level;
+  out[OFS_ST_FREQ_L]     = (uint8_t)(wave_freq & 0xFF);
+  out[OFS_ST_FREQ_H]     = (uint8_t)((wave_freq >> 8) & 0xFF);
+
+  crc = proto_crc16(out, 10);              /* 覆盖 0..9 */
+  out[10] = (uint8_t)(crc & 0xFF);
+  out[11] = (uint8_t)((crc >> 8) & 0xFF);
+  return PROTO_STATUS_LEN;
 }
 
 /* 组一帧数据帧（A 板用 / 自测用），返回总长（固定 260） */

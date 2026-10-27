@@ -59,6 +59,15 @@
 #define GEAR_500US           3
 #define GEAR_100US           4
 
+/* 状态帧字段偏移（A→B，固定 12 字节） */
+#define OFS_ST_GEAR          3
+#define OFS_ST_CH_MASK       4
+#define OFS_ST_TRIG_SRC      5
+#define OFS_ST_TRIG_MODE     6
+#define OFS_ST_TRIG_LEVEL    7
+#define OFS_ST_FREQ_L        8
+#define OFS_ST_FREQ_H        9
+
 /* 控制帧命令（B→A） */
 #define CMD_GEAR             0x01
 #define CMD_CHMASK           0x02
@@ -87,6 +96,18 @@ typedef struct {
   uint8_t      payload[PROTO_PAYLOAD_LEN];   /* 50 点 × 5 字节 */
 } proto_frame_t;
 
+/* 状态帧解析结果（A 板回报的当前设置） */
+typedef struct {
+  uint8_t  valid;        /* 收到过有效状态帧 = 1 */
+  uint32_t count;        /* 有效状态帧累计数，用于判断“有新回执” */
+  uint8_t  gear;
+  uint8_t  ch_mask;
+  uint8_t  trig_src;     /* 0=关闭 1=CH1 2=CH2 3=D1 4=D2 5=D3 */
+  uint8_t  trig_mode;    /* 0=上升沿 1=下降沿 2=任意边沿 */
+  uint8_t  trig_level;   /* 0~255，线性映射 0~VREF */
+  uint16_t wave_freq;    /* 当前矩形波频率，Hz */
+} proto_status_t;
+
 /* ---- API ---- */
 uint16_t proto_crc16(const uint8_t *buf, uint32_t len);
 void     proto_reset(void);           /* 清空解析器状态 */
@@ -94,9 +115,15 @@ void     proto_feed(uint8_t b);       /* 喂一个字节，内部状态机 */
 int      proto_frame_ready(void);     /* 是否有新的有效数据帧 */
 const proto_frame_t *proto_frame(void);
 proto_stat_t *proto_stat(void);
+const proto_status_t *proto_status(void);   /* 最近一次状态帧（A 板回执） */
 
 /* 组一帧控制帧（B→A），返回帧长（9） */
 uint16_t proto_build_ctrl(uint8_t *out, uint8_t cmd, uint16_t param);
+
+/* 组一帧状态帧（A 板用 / 假数据源自测），返回帧长（12） */
+uint16_t proto_build_status(uint8_t *out, uint8_t gear, uint8_t ch_mask,
+                            uint8_t trig_src, uint8_t trig_mode, uint8_t trig_level,
+                            uint16_t wave_freq);
 
 /* 组一帧数据帧（A 板用，B 板自测也可用） */
 uint16_t proto_build_data(uint8_t *out, uint16_t seq, uint8_t gear,
