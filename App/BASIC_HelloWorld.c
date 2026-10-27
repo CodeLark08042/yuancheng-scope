@@ -517,10 +517,26 @@ static uint16_t trig_level_mv(void)
 static void draw_trig_indicator(void)
 {
   const proto_status_t *st = proto_status();
-  uint8_t confirmed = (uint8_t)(st->valid &&
-                                st->trig_src   == g_trig_src &&
-                                st->trig_mode  == g_trig_mode &&
-                                st->trig_level == g_trig_level);
+  uint8_t m = st->ch_mask ? st->ch_mask : g_mask;
+  uint8_t confirmed;
+  uint8_t src_off;
+
+  /* 数字触发源时电平参数被 A 板忽略，回显值可能被清零；
+     因此只比较源与方式，避免绿框永远不亮（模拟源仍三项全比） */
+  if (g_trig_src >= 3) {
+    confirmed = (uint8_t)(st->valid &&
+                          st->trig_src  == g_trig_src &&
+                          st->trig_mode == g_trig_mode);
+  } else {
+    confirmed = (uint8_t)(st->valid &&
+                          st->trig_src   == g_trig_src &&
+                          st->trig_mode  == g_trig_mode &&
+                          st->trig_level == g_trig_level);
+  }
+
+  /* 触发源通道被关闭：A 板按自由运行处理（补充条款第 9 条），显示 AUTO */
+  src_off = (uint8_t)(g_trig_src >= 1 && g_trig_src <= 5 &&
+                      (m & (uint8_t)(1u << (g_trig_src - 1))) == 0);
 
   GUI_SetFont(&GUI_Font6x8);
   GUI_SetTextMode(GUI_TM_TRANS);
@@ -540,7 +556,11 @@ static void draw_trig_indicator(void)
   GUI_DispStringAt(trig_mode_txt[g_trig_mode < 3 ? g_trig_mode : 0],
                    TRIG_X0 + 50, TRIG_Y0 + 1);
 
-  if (g_trig_src <= 2) {                       /* 模拟通道：显示电平 */
+  if (src_off) {                               /* 源通道关闭：自由运行 */
+    GUI_SetColor(GUI_DARKGRAY);
+    GUI_DispStringAt("AUTO", TRIG_X0 + 80, TRIG_Y0 + 1);
+  } else if (g_trig_src <= 2) {                /* 模拟通道：显示电平 */
+    GUI_SetColor(g_trig_src ? GUI_YELLOW : GUI_GRAY);
     GUI_DispDecAt((I32)trig_level_mv(), TRIG_X0 + 80, TRIG_Y0 + 1, 4);
     GUI_DispStringAt("mV", TRIG_X0 + 106, TRIG_Y0 + 1);
   } else {                                     /* 数字通道：只看逻辑沿 */
@@ -699,6 +719,38 @@ static void draw_meas(void)
       GUI_DispStringAt("--- OFF ---", x + 18, MEAS_Y0 + 11);
     }
   }
+}
+
+/* ---------------- 链路统计条 ----------------
+   紧贴屏幕底边（y=264，仅 8px 高）显示 SEQ、CRC 错误、丢帧数和链路状态，
+   用于验收时观察链路健壮性。CRC/DROP 为 0 时灰色，非 0 时告警色。
+--------------------------------------------------------- */
+static void draw_link_stats(void)
+{
+  const proto_stat_t *st = proto_stat();
+
+  GUI_SetFont(&GUI_Font6x8);
+  GUI_SetTextMode(GUI_TM_TRANS);
+
+  GUI_SetColor(GUI_DARKGRAY);
+  GUI_DispStringAt("SEQ", 2, 264);
+  GUI_SetColor(GUI_CYAN);
+  GUI_DispDecAt((I32)st->last_seq, 22, 264, 5);
+
+  GUI_SetColor(GUI_DARKGRAY);
+  GUI_DispStringAt("CRC", 60, 264);
+  GUI_SetColor(st->crc_err ? GUI_RED : GUI_GRAY);
+  GUI_DispDecAt((I32)st->crc_err, 80, 264, 4);
+
+  GUI_SetColor(GUI_DARKGRAY);
+  GUI_DispStringAt("DROP", 116, 264);
+  GUI_SetColor(st->drop ? GUI_YELLOW : GUI_GRAY);
+  GUI_DispDecAt((I32)st->drop, 140, 264, 4);
+
+  GUI_SetColor(GUI_DARKGRAY);
+  GUI_DispStringAt("LINK", 176, 264);
+  GUI_SetColor(g_last_link_ok ? GUI_GREEN : GUI_RED);
+  GUI_DispStringAt(g_last_link_ok ? "OK" : "--", 200, 264);
 }
 
 /* ---------------- 数字键盘（设置矩形波频率） ----------------
@@ -934,6 +986,35 @@ static void draw_trig_panel(void)
            "CLOSE", GUI_GREEN);
 }
 
+/* 触发电平步进：dir=-1 减小、+1 增大；步进 16 码 ≈ 0.21V */
+static void trig_level_step(int8_t dir)
+{
+  if (dir < 0) {
+    g_trig_level = (uint8_t)((g_trig_level >= 16) ? (g_trig_level - 16) : 0);
+  } else {
+    g_trig_level = (uint8_t)((g_trig_level <= 239) ? (g_trig_level + 16) : 255);
+  }
+  send_ctrl(CMD_TRIG_LEVEL, g_trig_level);
+}
+
+/* 判断点是否落在触发面板的电平 -/+ 按钮上：返回 -1 / +1 / 0 */
+static int8_t trig_adj_hit(uint16_t x, uint16_t y)
+{
+  if (!g_trig_open) {
+    return 0;
+  }
+  if (y < TG_ROW3_Y || y > TG_ROW3_Y + TG_ROW_H) {
+    return 0;
+  }
+  if (x >= TG_MINUS_X && x <= TG_MINUS_X + TG_ADJ_W) {
+    return -1;
+  }
+  if (x >= TG_PLUS_X && x <= TG_PLUS_X + TG_ADJ_W) {
+    return 1;
+  }
+  return 0;
+}
+
 static uint8_t handle_trig_tap(uint16_t x, uint16_t y)
 {
   /* 面板范围外：关闭 */
@@ -958,16 +1039,11 @@ static uint8_t handle_trig_tap(uint16_t x, uint16_t y)
     return 1;
   }
 
-  /* 行 3：触发电平 - / +（步进 16 ≈ 0.21V） */
-  if (y >= TG_ROW3_Y && y <= TG_ROW3_Y + TG_ROW_H) {
-    if (x >= TG_MINUS_X && x <= TG_MINUS_X + TG_ADJ_W) {
-      g_trig_level = (uint8_t)((g_trig_level >= 16) ? (g_trig_level - 16) : 0);
-      send_ctrl(CMD_TRIG_LEVEL, g_trig_level);
-      return 1;
-    }
-    if (x >= TG_PLUS_X && x <= TG_PLUS_X + TG_ADJ_W) {
-      g_trig_level = (uint8_t)((g_trig_level <= 239) ? (g_trig_level + 16) : 255);
-      send_ctrl(CMD_TRIG_LEVEL, g_trig_level);
+  /* 行 3：触发电平 - / +（步进 16 ≈ 0.21V；按住可连发） */
+  {
+    int8_t d = trig_adj_hit(x, y);
+    if (d != 0) {
+      trig_level_step(d);
       return 1;
     }
   }
@@ -1206,6 +1282,7 @@ static void draw_screen(void)
   draw_axis();            /* 坐标轴标签最后画，带黑底保证可读 */
   draw_topbar(g_last_frame, g_last_ts_ok, g_last_link_ok);
   draw_meas();
+  draw_link_stats();      /* 底部 8px 链路统计条 */
   draw_keypad();          /* 键盘弹出时覆盖在波形之上 */
   draw_menu();            /* 导出菜单弹出时覆盖在最上层 */
   draw_trig_panel();      /* 触发设置面板 */
@@ -1230,6 +1307,8 @@ void MainTask(void)
   uint32_t last_status = 0;
   uint32_t stall = 0;
   uint8_t  link_ok = 1;
+  uint16_t hold_ticks = 0;      /* 按住节拍（50ms/拍），用于电平键连发 */
+  int8_t   repeat_dir = 0;      /* 当前按住的方向，0 = 未按住 +/- */
 
 #ifdef RX_SOURCE_UART
   proto_reset();
@@ -1258,14 +1337,34 @@ void MainTask(void)
   GUI_Clear();
 
   for (;;) {
-    /* --- 触摸（上升沿触发一次） --- */
+    /* --- 触摸：按下沿触发一次；停在触发面板电平 +/- 上则连发 --- */
     if (touch_read(&tx, &ty)) {
       if (!g_touch_down) {
         g_touch_down = 1;
+        hold_ticks = 0;
+        repeat_dir = 0;
         handle_tap(tx, ty);
+      } else {
+        int8_t dir = trig_adj_hit(tx, ty);
+
+        if (dir == 0) {
+          repeat_dir = 0;
+          hold_ticks = 0;
+        } else if (dir != repeat_dir) {
+          repeat_dir = dir;       /* 换到另一个键，重新计时 */
+          hold_ticks = 0;
+        } else {
+          hold_ticks++;
+          /* 按住 400ms 后开始连发，之后每 100ms 一步（2 × 50ms） */
+          if (hold_ticks >= 8 && ((hold_ticks - 8) % 2) == 0) {
+            trig_level_step(dir);
+          }
+        }
       }
     } else {
       g_touch_down = 0;
+      hold_ticks = 0;
+      repeat_dir = 0;
     }
 
     /* --- 板载按键 B1：按一次切换一个档位 --- */
