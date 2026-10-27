@@ -87,9 +87,10 @@ uint16_t fakesrc_tick(uint8_t *out, uint8_t gear, uint8_t ch_mask)
                            : ( 1000 - (int32_t)(k - 32) * 2000L / 31L);
       raw2 = norm_to_raw(v, 2048);
     }
-    if ((ch_mask & MASK_D1) && (phd1 & 0x80000000UL)) { dig |= MASK_D1; }
-    if ((ch_mask & MASK_D2) && (phd2 & 0x80000000UL)) { dig |= MASK_D2; }
-    if ((ch_mask & MASK_D3) && (phd3 & 0x80000000UL)) { dig |= MASK_D3; }
+    /* 通道是否开启用 CH_MASK 位（bit2~4）；写入 DIG 字节用 DIG 位（bit0~2） */
+    if ((ch_mask & MASK_D1) && (phd1 & 0x80000000UL)) { dig |= DIG_D1; }
+    if ((ch_mask & MASK_D2) && (phd2 & 0x80000000UL)) { dig |= DIG_D2; }
+    if ((ch_mask & MASK_D3) && (phd3 & 0x80000000UL)) { dig |= DIG_D3; }
 
     /* 协议编码：wire16 = raw12 << 4，小端 */
     wire1 = (uint16_t)(raw1 << 4);

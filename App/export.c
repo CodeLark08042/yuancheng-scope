@@ -11,6 +11,7 @@
 #include "main.h"
 #include "log_uart.h"
 #include "export.h"
+#include "proto.h"       /* DIG_D1/D2/D3：DIG 字节位定义（bit0~2，协议第 3.1 节） */
 
 #define SCR_W            480
 #define SCR_H            272
@@ -122,11 +123,11 @@ uint32_t export_csv(const uint16_t *ch1, const uint16_t *ch2,
     pos = app_str(line, pos, ",");
     pos = app_u32(line, pos, (uint32_t)r2 * 3300UL / 4095UL);
     pos = app_str(line, pos, ",");
-    pos = app_u32(line, pos, (d & 0x04) ? 1 : 0);
+    pos = app_u32(line, pos, (d & DIG_D1) ? 1 : 0);
     pos = app_str(line, pos, ",");
-    pos = app_u32(line, pos, (d & 0x08) ? 1 : 0);
+    pos = app_u32(line, pos, (d & DIG_D2) ? 1 : 0);
     pos = app_str(line, pos, ",");
-    pos = app_u32(line, pos, (d & 0x10) ? 1 : 0);
+    pos = app_u32(line, pos, (d & DIG_D3) ? 1 : 0);
     pos = app_str(line, pos, "\r\n");
 
     log_uart_write(line, pos);

@@ -144,11 +144,25 @@ static uint8_t g_kp_len = 0;
 /* ---- 导出菜单状态 ---- */
 static uint8_t  g_menu_open = 0;        /* 导出菜单是否弹出 */
 
+/* ---------------- 有效通道掩码 ----------------
+   A 板数据帧里的 CH_MASK 表示它采了哪些通道，本地 g_mask 表示用户想看哪些。
+   两者取交集：任一为关即不显示。
+   这样在 A 板尚未实现 CMD 0x02（通道开关）的阶段，B 端仍能本地关掉未接信号的
+   通道，避免浮空噪声压住要观察的那一路。
+--------------------------------------------------------- */
+static uint8_t cur_mask(void)
+{
+  uint8_t m = proto_stat()->ch_mask;
+
+  return m ? (uint8_t)(m & g_mask) : g_mask;
+}
+
 /* ---- 最近一帧的状态：导出 BMP 时用它重绘同一画面 ---- */
 static uint32_t g_last_frame   = 0;
 static uint8_t  g_last_ts_ok   = 1;
 static uint8_t  g_last_link_ok = 1;
 static uint8_t  g_fps          = 0;     /* 实测渲染帧率，用于验收“≥20 帧/秒” */
+static uint16_t g_rx_fps       = 0;     /* 实测接收帧率（有效数据帧/秒），联调用 */
 /* 临时性能诊断：绘制四阶段耗时(ms)：0=Begin拷贝 1=清屏+波形 2=文字控件 3=End等VSYNC */
 static uint8_t  g_dbg_t[4]     = { 0, 0, 0, 0 };
 
@@ -442,8 +456,8 @@ static void vline_ordered(int x, int y0, int y1)
 static void draw_digital(void)
 {
   static const GUI_COLOR col[3]  = { GUI_GREEN, GUI_YELLOW, GUI_MAGENTA };
-  static const uint8_t   bitm[3] = { MASK_D1, MASK_D2, MASK_D3 };
-  uint8_t m = proto_stat()->ch_mask;
+  static const uint8_t   bitm[3] = { DIG_D1, DIG_D2, DIG_D3 };   /* DIG 字节位，非 CH_MASK */
+  uint8_t m = cur_mask();
   int ch;
 
   for (ch = 0; ch < 3; ch++) {
@@ -509,7 +523,7 @@ static void draw_topbar(uint32_t frame, uint8_t ts_ok, uint8_t link_ok)
 {
   proto_stat_t *st = proto_stat();
   uint8_t g = (st->gear < 5) ? st->gear : g_gear;
-  uint8_t m = st->ch_mask ? st->ch_mask : g_mask;
+  uint8_t m = cur_mask();
   char buf[4];
 
   /* 档位按钮 */
@@ -578,7 +592,7 @@ static uint16_t trig_level_mv(void)
 static void draw_trig_indicator(void)
 {
   const proto_status_t *st = proto_status();
-  uint8_t m = st->ch_mask ? st->ch_mask : g_mask;
+  uint8_t m = cur_mask();
   uint8_t confirmed;
   uint8_t src_off;
 
@@ -644,10 +658,10 @@ static void draw_trig_level(void)
     return;                     /* OFF 或数字通道：不画电平线 */
   }
   /* 触发源通道被关掉时，没有信号可触发，线也一并隐藏，避免被误认为波形 */
-  if ((g_trig_src == 1) && ((proto_stat()->ch_mask & MASK_CH1) == 0)) {
+  if ((g_trig_src == 1) && ((cur_mask() & MASK_CH1) == 0)) {
     return;
   }
-  if ((g_trig_src == 2) && ((proto_stat()->ch_mask & MASK_CH2) == 0)) {
+  if ((g_trig_src == 2) && ((cur_mask() & MASK_CH2) == 0)) {
     return;
   }
 
@@ -715,7 +729,7 @@ static void draw_meas(void)
   uint32_t f1 = 0, f2 = 0;
   uint32_t fd[3], pw[3];
   uint8_t  ch;
-  uint8_t  m = proto_stat()->ch_mask;
+  uint8_t  m = cur_mask();
 
   GUI_SetFont(&GUI_Font6x8);
   GUI_SetTextMode(GUI_TM_TRANS);
@@ -770,7 +784,8 @@ static void draw_meas(void)
 
     GUI_SetColor(GUI_WHITE);
     if (on) {
-      meas_digital((uint8_t)(MASK_D1 << ch), &fd[ch], &pw[ch]);
+      /* meas_digital 与 dig[] 比较，必须用 DIG 字节位（不是 CH_MASK 位） */
+      meas_digital((uint8_t)(DIG_D1 << ch), &fd[ch], &pw[ch]);
       if (fd[ch] != 0) { GUI_DispDecAt((I32)fd[ch], x + 18, MEAS_Y0 + 11, 4); }
       else             { GUI_DispStringAt("---", x + 18, MEAS_Y0 + 11);      }
       GUI_DispStringAt("Hz", x + 46, MEAS_Y0 + 11);
@@ -799,25 +814,31 @@ static void draw_link_stats(void)
   GUI_DispDecAt((I32)st->last_seq, 22, 264, 5);
 
   GUI_SetColor(GUI_DARKGRAY);
-  GUI_DispStringAt("CRC", 60, 264);
+  GUI_DispStringAt("CRC", 58, 264);
   GUI_SetColor(st->crc_err ? GUI_RED : GUI_GRAY);
-  GUI_DispDecAt((I32)st->crc_err, 80, 264, 4);
+  GUI_DispDecAt((I32)st->crc_err, 78, 264, 4);
 
   GUI_SetColor(GUI_DARKGRAY);
-  GUI_DispStringAt("DROP", 116, 264);
+  GUI_DispStringAt("DROP", 108, 264);
   GUI_SetColor(st->drop ? GUI_YELLOW : GUI_GRAY);
-  GUI_DispDecAt((I32)st->drop, 140, 264, 4);
+  GUI_DispDecAt((I32)st->drop, 132, 264, 4);
 
   GUI_SetColor(GUI_DARKGRAY);
-  GUI_DispStringAt("LINK", 176, 264);
+  GUI_DispStringAt("LINK", 162, 264);
   GUI_SetColor(g_last_link_ok ? GUI_GREEN : GUI_RED);
-  GUI_DispStringAt(g_last_link_ok ? "OK" : "--", 200, 264);
+  GUI_DispStringAt(g_last_link_ok ? "OK" : "--", 186, 264);
+
+  /* 接收帧率（联调用）：每秒收到的有效数据帧数，与渲染帧率 FPS 分开看 */
+  GUI_SetColor(GUI_DARKGRAY);
+  GUI_DispStringAt("RX", 206, 264);
+  GUI_SetColor(GUI_CYAN);
+  GUI_DispDecAt((I32)g_rx_fps, 222, 264, 4);
 
   /* 实测帧率：任务书提高部分（3）要求 ≥20 帧/秒，这里给出屏上依据 */
   GUI_SetColor(GUI_DARKGRAY);
-  GUI_DispStringAt("FPS", 240, 264);
+  GUI_DispStringAt("FPS", 252, 264);
   GUI_SetColor(g_fps >= 20 ? GUI_GREEN : GUI_ORANGE);
-  GUI_DispDecAt((I32)g_fps, 264, 264, 3);
+  GUI_DispDecAt((I32)g_fps, 276, 264, 3);
 
   /* 临时性能诊断：B/W/T/E 四阶段耗时(ms) */
   GUI_SetFont(&GUI_Font6x8);
@@ -1357,8 +1378,8 @@ static void draw_screen(void)
   GUI_SetBkColor(GUI_BLACK);
   GUI_Clear();
   draw_grid();
-  if (proto_stat()->ch_mask & MASK_CH1) { draw_analog(ch1, GUI_BLUE); }
-  if (proto_stat()->ch_mask & MASK_CH2) { draw_analog(ch2, GUI_RED);  }
+  if (cur_mask() & MASK_CH1) { draw_analog(ch1, GUI_BLUE); }
+  if (cur_mask() & MASK_CH2) { draw_analog(ch2, GUI_RED);  }
   draw_digital();
   draw_trig_level();      /* 触发电平虚线，压在波形之上 */
   t2 = HAL_GetTick();
@@ -1405,6 +1426,7 @@ void MainTask(void)
   uint32_t last_draw = 0;
   uint32_t fps_cnt = 0;
   uint32_t fps_tick = 0;
+  uint32_t rx_prev = 0;
   uint32_t pushed_good = 0;
   uint32_t repeat_ms = 0;
   uint8_t  link_ok = 1;
@@ -1527,9 +1549,10 @@ void MainTask(void)
         uint16_t w1 = (uint16_t)(p[PNT_CH1_L] | ((uint16_t)p[PNT_CH1_H] << 8));
         uint16_t w2 = (uint16_t)(p[PNT_CH2_L] | ((uint16_t)p[PNT_CH2_H] << 8));
 
+        /* 只保留 DIG 字节里的三路数字位（bit0~2），与 CH_MASK 的 bit2~4 无关 */
         ring_push((uint16_t)(w1 >> 4),
                   (uint16_t)(w2 >> 4),
-                  (uint8_t)(p[PNT_DIG] & (MASK_D1 | MASK_D2 | MASK_D3)));
+                  (uint8_t)(p[PNT_DIG] & (DIG_D1 | DIG_D2 | DIG_D3)));
       }
     }
 
@@ -1571,7 +1594,7 @@ void MainTask(void)
       fps_cnt++;
     }
 
-    /* --- 每满 1 秒统计一次实际渲染帧率 --- */
+    /* --- 每满 1 秒统计一次：渲染帧率 + 接收帧率 --- */
     {
       uint32_t now = HAL_GetTick();
 
@@ -1579,6 +1602,10 @@ void MainTask(void)
         uint32_t dt = now - fps_tick;
 
         g_fps = (uint8_t)((fps_cnt * 1000U) / dt);
+
+        /* 接收帧率：有效数据帧增量 / 实际经过时间（A 发了多少、B 收到多少，联调必需） */
+        g_rx_fps = (uint16_t)(((proto_stat()->good - rx_prev) * 1000U) / dt);
+        rx_prev  = proto_stat()->good;
 
         fps_cnt  = 0;
         fps_tick = now;

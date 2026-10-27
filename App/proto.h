@@ -45,12 +45,21 @@
 #define PNT_CH2_H            3
 #define PNT_DIG              4
 
-/* 通道掩码 */
+/* 通道掩码（CH_MASK 字段，协议第 3 节：bit0=CH1 bit1=CH2 bit2=D1 bit3=D2 bit4=D3） */
 #define MASK_CH1             0x01
 #define MASK_CH2             0x02
 #define MASK_D1              0x04
 #define MASK_D2              0x08
 #define MASK_D3              0x10
+
+/* 数字采样位（数据帧 DIG 字节，协议第 3.1 节：bit0=D1 bit1=D2 bit2=D3）
+   注意与上面的 MASK_D* 区分：
+     MASK_D* 用于 CH_MASK（通道开关），协议规定 D1 在 bit2；
+     DIG_D*  用于采样点的 DIG 字节，协议规定 D1 在 bit0。
+   两者是不同字段，位位置不同，不可混用。 */
+#define DIG_D1               0x01
+#define DIG_D2               0x02
+#define DIG_D3               0x04
 
 /* 时基档位 */
 #define GEAR_10MS            0
