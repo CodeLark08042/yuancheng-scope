@@ -49,7 +49,34 @@ void uart_rx_start(void)
   s_rd = 0;
   s_wr = 0;
 
+  /* 清掉上电/初始化期间 A 板持续发送留下的 ORE/FE/NE/PE，
+     否则第一个中断就是错误，HAL 会直接结束接收。 */
+  __HAL_UART_CLEAR_OREFLAG(&huart6);
+  __HAL_UART_CLEAR_FEFLAG(&huart6);
+  __HAL_UART_CLEAR_NEFLAG(&huart6);
+  __HAL_UART_CLEAR_PEFLAG(&huart6);
+
   (void)HAL_UART_Receive_IT(&huart6, &s_rx_byte, 1);
+}
+
+/* UART 错误恢复：
+   ORE（溢出）在 HAL 里属于 blocking error，会 UART_EndRxTransfer()：
+   RxState 置 READY 并关闭 RXNEIE，之后不再收任何字节，屏上表现为
+   “U 闪一下 → 500ms 后 LINK--、RX=0”。这里清标志并重新挂接收。
+   FE/NE/PE 属于非阻塞错误，清标志后原接收链继续。 */
+void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
+{
+  if (huart->Instance == USART6) {
+    __HAL_UART_CLEAR_OREFLAG(huart);
+    __HAL_UART_CLEAR_FEFLAG(huart);
+    __HAL_UART_CLEAR_NEFLAG(huart);
+    __HAL_UART_CLEAR_PEFLAG(huart);
+    huart->ErrorCode = HAL_UART_ERROR_NONE;
+
+    if (huart->RxState == HAL_UART_STATE_READY) {
+      (void)HAL_UART_Receive_IT(huart, &s_rx_byte, 1);
+    }
+  }
 }
 
 void uart_rx_poll(void (*feed)(uint8_t))
