@@ -1578,6 +1578,14 @@ void MainTask(void)
       g_trig_level = proto_status()->trig_level;
     }
 
+#if defined(RX_SOURCE_LINK)
+    /* 档位以 A 板数据帧里的 GEAR 为准，保证下一次按键从实际档位递增。
+       只在真实链路同步：fakesrc 模式下 g_gear 是数据源，不能被旧帧回写。 */
+    if (proto_stat()->gear < 5) {
+      g_gear = proto_stat()->gear;
+    }
+#endif
+
     /* 数据帧已在 proto 解析完成时由 frame_in() 回调入环，
        这里不再按 good 计数取"最后一帧"（会丢掉同一次轮询的其余帧）。 */
 
