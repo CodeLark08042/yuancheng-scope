@@ -36,7 +36,7 @@
      都不定义      ：使用板内假数据源 fakesrc，单板即可完整自测波形与测量。
    三条路径共用同一个协议解析器 proto，切换不影响其它任何功能。
    ==================================================== */
-/* #define RX_SOURCE_UART */
+#define RX_SOURCE_UART
 /* #define RX_SOURCE_UDP */     /* 无网口/U 盘网卡时先注释，用假数据自测 */
 
 #if defined(RX_SOURCE_UART) || defined(RX_SOURCE_UDP)
@@ -126,6 +126,17 @@ static const char *axis_end[5] = { "100ms", "50ms", "10ms", "5ms", "1ms" };
 
 /* ---------------- 本地状态 ---------------- */
 static uint8_t g_gear = GEAR_10MS;
+
+/* 档位命令的待确认目标（0xFF = 无待确认请求）。
+   B 的档位按钮必须能发出 0~4 全部值，否则 A 实现 CMD01 后无法验证
+   GEAR1→GEAR0（A 拒绝 2~4 时，若每次都按 A 的回显递增，就永远发不出 0）。
+   做法：每次按键在“上次请求值”上递增并保持 1.2s——
+     A 回显等于请求值 → 立即清除（切换成功）；
+     超时仍不等 → 清除（A 安全拒绝），下次按键重新从 A 的实际档位递增。
+   屏幕档位与时间轴始终取 A 的 GEAR，不显示请求值。 */
+#define GEAR_REQ_HOLD_MS  1200
+static uint8_t  g_gear_req      = 0xFF;
+static uint32_t g_gear_req_tick = 0;
 static uint8_t g_mask = MASK_CH1 | MASK_CH2 | MASK_D1 | MASK_D2 | MASK_D3;
 static uint8_t g_touch_down = 0;
 static uint16_t g_wave_freq = 1000;     /* 矩形波频率（Hz），默认 1kHz，范围 100~10000 */
@@ -308,6 +319,23 @@ static void send_ctrl(uint8_t cmd, uint16_t param)
 
 #ifndef RX_SOURCE_LINK
   fake_status_reply();        /* 自测模式：模拟 A 板回执 */
+#endif
+}
+
+/* 档位按钮：真实链路下按“上次请求值”递增，保证 0~4 都能发出去；
+   自测模式下 g_gear 本身就是数据源的档位，直接递增即可。 */
+static void gear_next(void)
+{
+#if defined(RX_SOURCE_LINK)
+  uint8_t base = (g_gear_req != 0xFF) ? g_gear_req : g_gear;
+  uint8_t next = (uint8_t)((base + 1) % 5);
+
+  g_gear_req      = next;
+  g_gear_req_tick = HAL_GetTick();
+  send_ctrl(CMD_GEAR, next);
+#else
+  g_gear = (uint8_t)((g_gear + 1) % 5);
+  send_ctrl(CMD_GEAR, g_gear);
 #endif
 }
 
@@ -510,8 +538,11 @@ static void draw_digital(void)
     int i, prev_y;
     int x_prev = 0;
 
-    /* 通道关闭时不绘制 */
-    if ((m & bitm[ch]) == 0) {
+    /* 通道关闭时不绘制。
+       注意：开关判据用 CH_MASK 位（MASK_D1<<ch），取电平用 DIG 位（bitm[ch]）。
+       两套位定义不同——DIG 里 D1 在 bit0，而 CH_MASK 里 D1 在 bit2；
+       若这里误用 bitm[ch] 判开关，会变成“D1 跟着 CH1、D3 跟着 D1”。 */
+    if ((m & (uint8_t)(MASK_D1 << ch)) == 0) {
       continue;
     }
 
@@ -846,7 +877,8 @@ static void draw_meas(void)
 --------------------------------------------------------- */
 static void draw_link_stats(void)
 {
-  const proto_stat_t *st = proto_stat();
+  const proto_stat_t   *st = proto_stat();
+  const proto_status_t *ss = proto_status();
 
   GUI_SetFont(&GUI_Font6x8);
   GUI_SetTextMode(GUI_TM_TRANS);
@@ -893,6 +925,40 @@ static void draw_link_stats(void)
   GUI_SetColor(GUI_WHITE);     GUI_DispDecAt((I32)g_dbg_t[2], 346, 264, 2);
   GUI_SetColor(GUI_DARKGRAY);  GUI_DispStringAt("E", 360, 264);
   GUI_SetColor(GUI_WHITE);     GUI_DispDecAt((I32)g_dbg_t[3], 366, 264, 2);
+
+  /* A 板状态帧回执（验收记录用，无需挂调试器）：
+     ST = 有效状态帧累计数，G = 状态帧 GEAR，M = 状态帧 CH_MASK（十六进制）。
+     收到 CMD 0x06 或 A 板主动上报时 ST 递增；G/M 为 A 板当前实际设置。 */
+  {
+    const char *hex = "0123456789ABCDEF";
+    char mb[3];
+
+    GUI_SetColor(GUI_DARKGRAY);
+    GUI_DispStringAt("ST", 382, 264);
+    GUI_SetColor(ss->valid ? GUI_CYAN : GUI_GRAY);
+    GUI_DispDecAt((I32)ss->count, 394, 264, 4);
+
+    GUI_SetColor(GUI_DARKGRAY);
+    GUI_DispStringAt("G", 420, 264);
+    GUI_SetColor(ss->valid ? GUI_CYAN : GUI_GRAY);
+    if (ss->valid) {
+      GUI_DispDecAt((I32)ss->gear, 426, 264, 1);
+    } else {
+      GUI_DispStringAt("-", 426, 264);
+    }
+
+    GUI_SetColor(GUI_DARKGRAY);
+    GUI_DispStringAt("M", 433, 264);
+    GUI_SetColor(ss->valid ? GUI_CYAN : GUI_GRAY);
+    if (ss->valid) {
+      mb[0] = hex[(ss->ch_mask >> 4) & 0x0F];
+      mb[1] = hex[ss->ch_mask & 0x0F];
+      mb[2] = 0;
+      GUI_DispStringAt(mb, 439, 264);
+    } else {
+      GUI_DispStringAt("--", 439, 264);
+    }
+  }
 }
 
 /* ---------------- 数字键盘（设置矩形波频率） ----------------
@@ -1362,8 +1428,7 @@ static void handle_tap(uint16_t x, uint16_t y)
     if (x >= buttons[i].x0 && x <= buttons[i].x1) {
       if (buttons[i].id == 0) {
         /* 档位循环：10ms → 5ms → 1ms → 500us → 100us */
-        g_gear = (uint8_t)((g_gear + 1) % 5);
-        send_ctrl(CMD_GEAR, g_gear);
+        gear_next();
       } else if (buttons[i].id == 6) {
         /* 矩形波频率 -100Hz */
         if (g_wave_freq >= 200) {
@@ -1397,8 +1462,15 @@ static void handle_tap(uint16_t x, uint16_t y)
         /* 打开导出菜单 */
         g_menu_open = 1;
       } else {
+        /* 以“屏上实际显示的通道”（A 掩码 ∩ 本地掩码）为基准取反：
+             - A 未实现 CMD02 时 cur_mask() == g_mask，与直接 g_mask ^= bit 等价；
+             - A 实现 CMD02 后，若两边掩码有偏差（典型：B 复位后 g_mask 回到 0x1F，
+               而 A 仍保持上次的 0x1E），按显示状态取反能一次点击就拉齐，
+               不会出现“按两下才生效”或误开其它通道。 */
         uint8_t bit = (uint8_t)(1u << (buttons[i].id - 1));
-        g_mask ^= bit;
+        uint8_t m   = cur_mask();
+
+        g_mask = (uint8_t)((m & bit) ? (m & (uint8_t)~bit) : (m | bit));
         send_ctrl(CMD_CHMASK, g_mask);
       }
       return;
@@ -1564,8 +1636,7 @@ void MainTask(void)
     {
       uint8_t key = (HAL_GPIO_ReadPin(GPIOI, GPIO_PIN_11) == GPIO_PIN_SET) ? 1 : 0;
       if (key && !key_prev) {
-        g_gear = (uint8_t)((g_gear + 1) % 5);
-        send_ctrl(CMD_GEAR, g_gear);
+        gear_next();
       }
       key_prev = key;
     }
@@ -1579,10 +1650,20 @@ void MainTask(void)
     }
 
 #if defined(RX_SOURCE_LINK)
-    /* 档位以 A 板数据帧里的 GEAR 为准，保证下一次按键从实际档位递增。
+    /* 档位以 A 板数据帧里的 GEAR 为准：屏幕文字、时间轴、测量都用它。
        只在真实链路同步：fakesrc 模式下 g_gear 是数据源，不能被旧帧回写。 */
     if (proto_stat()->gear < 5) {
       g_gear = proto_stat()->gear;
+    }
+
+    /* 档位请求确认：A 回显等于请求值 = 切换成功，立即清掉；
+       超过 GEAR_REQ_HOLD_MS 仍未回显 = A 安全拒绝，下次按键从 A 的实际档位重新递增。 */
+    if (g_gear_req != 0xFF) {
+      if (proto_stat()->gear == g_gear_req) {
+        g_gear_req = 0xFF;
+      } else if ((uint32_t)(HAL_GetTick() - g_gear_req_tick) >= GEAR_REQ_HOLD_MS) {
+        g_gear_req = 0xFF;
+      }
     }
 #endif
 
