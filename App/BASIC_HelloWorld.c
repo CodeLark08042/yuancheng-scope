@@ -214,6 +214,49 @@ static uint16_t idx_of(uint16_t k)
   return (uint16_t)((wpos + k) % TOTAL_PTS);
 }
 
+/* ---------------- 帧入环 ----------------
+   由 proto 在每帧 CRC 通过后回调，保证「一次轮询解析出的多帧」全部入环。
+   旧做法用 good 计数在主循环里只取最后一帧：真实链路一次轮询会有多帧，
+   其余帧被丢掉，500 点窗口就成了间隔 66ms 的非连续片段拼接。
+--------------------------------------------------------- */
+static uint16_t s_last_r1;
+static uint16_t s_last_r2;
+static uint8_t  s_last_d;
+
+/* SEQ 断档：不跨缺口拼接，用上一有效样本铺满，等新数据覆盖 */
+static void ring_fill(uint16_t r1, uint16_t r2, uint8_t d)
+{
+  uint16_t k;
+
+  for (k = 0; k < TOTAL_PTS; k++) {
+    ch1[k] = r1;
+    ch2[k] = r2;
+    dig[k] = d;
+  }
+  wpos = 0;
+}
+
+static void frame_in(const proto_frame_t *f)
+{
+  uint16_t pt;
+
+  if (f->gap) {
+    ring_fill(s_last_r1, s_last_r2, s_last_d);
+  }
+
+  for (pt = 0; pt < PROTO_N_POINTS; pt++) {
+    const uint8_t *p = &f->payload[pt * PROTO_POINT_LEN];
+    uint16_t r1 = (uint16_t)((p[PNT_CH1_L] | ((uint16_t)p[PNT_CH1_H] << 8)) >> 4);
+    uint16_t r2 = (uint16_t)((p[PNT_CH2_L] | ((uint16_t)p[PNT_CH2_H] << 8)) >> 4);
+    uint8_t  d  = (uint8_t)(p[PNT_DIG] & (DIG_D1 | DIG_D2 | DIG_D3));
+
+    ring_push(r1, r2, d);
+    s_last_r1 = r1;
+    s_last_r2 = r2;
+    s_last_d  = d;
+  }
+}
+
 static int raw12_to_y(uint16_t raw)
 {
   int32_t v = (int32_t)raw * WAVE_H / 4095L;
@@ -1427,7 +1470,6 @@ void MainTask(void)
   uint32_t fps_cnt = 0;
   uint32_t fps_tick = 0;
   uint32_t rx_prev = 0;
-  uint32_t pushed_good = 0;
   uint32_t repeat_ms = 0;
   uint8_t  link_ok = 1;
   int8_t   repeat_dir = 0;
@@ -1445,6 +1487,7 @@ void MainTask(void)
   fakesrc_init();
   proto_reset();
 #endif
+  proto_set_frame_cb(frame_in);   /* 每帧有效数据帧立即入环 */
   ts_ok = touch_init();
   log_uart_init();        /* USART1 经 ST-Link 虚拟串口，用于导出文件到 PC */
 
@@ -1535,26 +1578,8 @@ void MainTask(void)
       g_trig_level = proto_status()->trig_level;
     }
 
-    /* --- 有新帧 → 50 点灌入环形缓冲 ---
-       用 good 计数器判断"是否新帧"：proto_frame_ready() 收到第一帧后一直为 1，
-       若直接用它会导致每轮重复灌同一帧。 */
-    if (proto_stat()->good != pushed_good) {
-      const proto_frame_t *f = proto_frame();
-      uint16_t pt;
-
-      pushed_good = proto_stat()->good;
-
-      for (pt = 0; pt < PROTO_N_POINTS; pt++) {
-        const uint8_t *p = &f->payload[pt * PROTO_POINT_LEN];
-        uint16_t w1 = (uint16_t)(p[PNT_CH1_L] | ((uint16_t)p[PNT_CH1_H] << 8));
-        uint16_t w2 = (uint16_t)(p[PNT_CH2_L] | ((uint16_t)p[PNT_CH2_H] << 8));
-
-        /* 只保留 DIG 字节里的三路数字位（bit0~2），与 CH_MASK 的 bit2~4 无关 */
-        ring_push((uint16_t)(w1 >> 4),
-                  (uint16_t)(w2 >> 4),
-                  (uint8_t)(p[PNT_DIG] & (DIG_D1 | DIG_D2 | DIG_D3)));
-      }
-    }
+    /* 数据帧已在 proto 解析完成时由 frame_in() 回调入环，
+       这里不再按 good 计数取"最后一帧"（会丢掉同一次轮询的其余帧）。 */
 
     /* --- 链路监测：连续 500ms 没有新有效帧则判定断开（时间基准） --- */
     if (proto_stat()->good != last_good) {

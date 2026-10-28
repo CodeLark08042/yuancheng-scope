@@ -18,6 +18,7 @@ typedef enum {
 static proto_frame_t g_frame;
 static proto_stat_t  g_stat;
 static proto_status_t g_status;
+static proto_frame_cb_t g_frame_cb;   /* 每帧有效数据帧的回调（显示端注册） */
 static proto_state_t g_state = ST_HEAD0;
 static uint8_t       g_rxbuf[PROTO_DATA_LEN];
 static uint16_t      g_len;      /* 当前帧已收字节数 */
@@ -82,10 +83,12 @@ static void frame_complete(void)
     seq = (uint16_t)(g_rxbuf[OFS_SEQ_L] | ((uint16_t)g_rxbuf[OFS_SEQ_H] << 8));
 
     /* SEQ 循环比较：计算实际跳变，累加入 drop */
+    g_frame.gap = 0;
     if (g_stat.good > 0) {
       uint16_t gap = (uint16_t)(seq - g_stat.last_seq);   /* 无符号，天然处理回绕 */
       if (gap > 1) {
         g_stat.drop += (uint32_t)(gap - 1);
+        g_frame.gap   = 1;
       }
     }
     g_stat.last_seq = seq;
@@ -105,6 +108,11 @@ static void frame_complete(void)
     }
     g_stat.gear    = g_frame.gear;
     g_stat.ch_mask = g_frame.ch_mask;
+
+    /* 通知显示端：本帧已完整解析，立即入环（一次轮询的多帧都不会丢） */
+    if (g_frame_cb != 0) {
+      g_frame_cb(&g_frame);
+    }
   } else if (type == PROTO_TYPE_STATUS) {
     /* A 板回执：记录当前档位、通道、触发配置和矩形波频率 */
     g_status.gear       = g_rxbuf[OFS_ST_GEAR];
@@ -128,6 +136,7 @@ void proto_reset(void)
   g_len   = 0;
   g_want  = 0;
   g_frame.ready = 0;
+  g_frame.gap   = 0;
   g_stat.good   = 0;
   g_stat.crc_err = 0;
   g_stat.drop   = 0;
@@ -181,6 +190,11 @@ void proto_feed(uint8_t b)
       }
       break;
   }
+}
+
+void proto_set_frame_cb(proto_frame_cb_t cb)
+{
+  g_frame_cb = cb;
 }
 
 int proto_frame_ready(void)

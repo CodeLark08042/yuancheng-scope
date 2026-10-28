@@ -102,8 +102,13 @@ typedef struct {
   uint8_t      seq[2];                /* 原始 SEQ 字节 */
   uint8_t      gear;
   uint8_t      ch_mask;
+  uint8_t      gap;                   /* 与上一有效帧 SEQ 不连续（内部标志，不上线） */
   uint8_t      payload[PROTO_PAYLOAD_LEN];   /* 50 点 × 5 字节 */
 } proto_frame_t;
+
+/* 每解析出一帧有效数据帧就回调一次（在 proto_feed 调用上下文执行）。
+   显示端借此把"一次轮询解析出的多帧"全部取走，而不是只留最后一帧。 */
+typedef void (*proto_frame_cb_t)(const proto_frame_t *f);
 
 /* 状态帧解析结果（A 板回报的当前设置） */
 typedef struct {
@@ -121,6 +126,7 @@ typedef struct {
 uint16_t proto_crc16(const uint8_t *buf, uint32_t len);
 void     proto_reset(void);           /* 清空解析器状态 */
 void     proto_feed(uint8_t b);       /* 喂一个字节，内部状态机 */
+void     proto_set_frame_cb(proto_frame_cb_t cb);  /* 注册每帧回调（可传 0 取消） */
 int      proto_frame_ready(void);     /* 是否有新的有效数据帧 */
 const proto_frame_t *proto_frame(void);
 proto_stat_t *proto_stat(void);

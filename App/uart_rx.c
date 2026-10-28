@@ -10,7 +10,9 @@
 #include "usart.h"
 #include "uart_rx.h"
 
-#define RX_RING_SIZE   2048
+/* 5ms 档 A 板约 200 帧/s（260B/帧）≈52kB/s；一次绘制约 66ms 不轮询，
+   期间积压约 3.4KB。原 2048 字节必溢出，改为 8192 留一倍余量。 */
+#define RX_RING_SIZE   8192
 
 static uint8_t s_ring[RX_RING_SIZE];
 static volatile uint16_t s_rd = 0;     /* 读指针（主循环） */
