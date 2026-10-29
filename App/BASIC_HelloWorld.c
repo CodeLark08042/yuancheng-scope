@@ -37,7 +37,7 @@
    三条路径共用同一个协议解析器 proto，切换不影响其它任何功能。
    ==================================================== */
 #define RX_SOURCE_UART
-/* #define RX_SOURCE_UDP */     /* 无网口/U 盘网卡时先注释，用假数据自测 */
+// #define RX_SOURCE_UDP    /* 无网口/U 盘网卡时先注释，用假数据自测 */
 
 #if defined(RX_SOURCE_UART) || defined(RX_SOURCE_UDP)
   #define RX_SOURCE_LINK      /* 有真实对端，不再伪造数据帧与状态帧回执 */
@@ -127,6 +127,7 @@ static const char *axis_end[5] = { "100ms", "50ms", "10ms", "5ms", "1ms" };
 /* ---------------- 本地状态 ---------------- */
 static uint8_t g_gear = GEAR_10MS;
 
+
 /* 档位命令的待确认目标（0xFF = 无待确认请求）。
    B 的档位按钮必须能发出 0~4 全部值，否则 A 实现 CMD01 后无法验证
    GEAR1→GEAR0（A 拒绝 2~4 时，若每次都按 A 的回显递增，就永远发不出 0）。
@@ -172,6 +173,9 @@ static uint8_t cur_mask(void)
 static uint32_t g_last_frame   = 0;
 static uint8_t  g_last_ts_ok   = 1;
 static uint8_t  g_last_link_ok = 1;
+#if defined(RX_SOURCE_UDP)
+static uint8_t  g_last_phy_up  = 0;     /* 以太网 PHY 是否 link（区分“网线没通”和“通了没数据”） */
+#endif
 static uint8_t  g_fps          = 0;     /* 实测渲染帧率，用于验收“≥20 帧/秒” */
 static uint16_t g_rx_fps       = 0;     /* 实测接收帧率（有效数据帧/秒），联调用 */
 /* 临时性能诊断：绘制四阶段耗时(ms)：0=Begin拷贝 1=清屏+波形 2=文字控件 3=End等VSYNC */
@@ -211,6 +215,12 @@ static uint16_t ch2[TOTAL_PTS];     /* raw12 */
 static uint8_t  dig[TOTAL_PTS];     /* 每点 DIG 字节 */
 static uint16_t wpos = 0;           /* 环形缓冲下一个写入位置 */
 
+/* 线性副本：环形缓冲按时间顺序展开后的结果（0 = 最老，TOTAL_PTS-1 = 最新）。
+   每帧绘制前由 make_linear_copy() 定格一次；绘制与测量、导出都只读它。 */
+static uint16_t s_lin1[TOTAL_PTS];
+static uint16_t s_lin2[TOTAL_PTS];
+static uint8_t  s_lind[TOTAL_PTS];
+
 /* ---------------- 环形缓冲工具 ---------------- */
 static void ring_push(uint16_t r1, uint16_t r2, uint8_t d)
 {
@@ -220,10 +230,12 @@ static void ring_push(uint16_t r1, uint16_t r2, uint8_t d)
   wpos = (uint16_t)((wpos + 1) % TOTAL_PTS);
 }
 
-static uint16_t idx_of(uint16_t k)
-{
-  return (uint16_t)((wpos + k) % TOTAL_PTS);
-}
+/* ---- 线性副本（时间顺序：最老 → 最新） ----
+   绘制与测量只读这份副本。UDP 模式下渲染过程会穿插轮询收包，
+   frame_in() 仍会继续改写原始环形缓冲；若直接读环，同一屏的前后
+   半部分会取自不同时刻（画面撕裂、测量值突变）。所以每帧绘制前
+   先把窗口定格一次，绘制中进来的新数据留到下一帧。 */
+static void make_linear_copy(void);
 
 /* ---------------- 帧入环 ----------------
    由 proto 在每帧 CRC 通过后回调，保证「一次轮询解析出的多帧」全部入环。
@@ -267,6 +279,30 @@ static void frame_in(const proto_frame_t *f)
     s_last_d  = d;
   }
 }
+
+/* ---------------- 渲染期间轮询以太网 ----------------
+   1ms 档 A 板每秒发 1000 帧（260B/包），而一次整屏绘制要 20~40ms。
+   若绘制全程不轮询，硬件只有 4 个 RX 描述符、12 个零拷贝接收池，
+   几毫秒就溢满，后续帧被 DMA 直接丢弃（屏上 RX 远低于 1000、DROP 持续涨）。
+   这里在耗时的绘制循环里按 1ms 节拍穿插轮询：ethernetif_input 内部是
+   do/while，一次调用会把 DMA 里已挂起的帧全部取完，所以每个时间片一次即可。
+   UART 模式是中断接收 + 8KB 环形缓冲，不需要这段。 */
+#if defined(RX_SOURCE_UDP)
+static uint32_t s_poll_tick = 0xFFFFFFFFUL;
+
+static void link_poll(void)
+{
+  uint32_t now = HAL_GetTick();
+
+  if (now == s_poll_tick) {
+    return;                     /* 同一毫秒内只轮询一次 */
+  }
+  s_poll_tick = now;
+  MX_LWIP_Process();
+}
+#else
+#define link_poll()   do { } while (0)
+#endif
 
 static int raw12_to_y(uint16_t raw)
 {
@@ -341,6 +377,32 @@ static void fb_hline(int x0, int x1, int y, uint32_t c)
   }
 }
 
+/* 清屏也改直写帧缓冲：
+   GUI_Clear 在 32bpp 非缓存 SDRAM 上要 4~5ms，中途无法让出 CPU，
+   是整帧里单次最长的不可打断点（超过 4 个 RX 描述符能撑的时间）。
+   逐行填充后每 32 行插一次收包轮询，单段压到 0.5ms 量级。
+   每帧全屏重绘，语义与 GUI_Clear(GUI_BLACK) 等价。 */
+#define FB_BLACK   0xFF000000UL
+
+static void fb_clear(void)
+{
+  uint32_t *p = s_fb;
+  int y;
+
+  for (y = 0; y < SCR_H; y++) {
+    int x;
+
+    for (x = 0; x < SCR_W; x++) {
+      p[x] = FB_BLACK;
+    }
+    p += SCR_W;
+
+    if ((y & 0x1F) == 0) {
+      link_poll();
+    }
+  }
+}
+
 #ifndef RX_SOURCE_LINK
 /* 假数据源模式：没有 A 板，直接伪造一帧状态帧，让触发面板能看到回执。
    真实链路（UART/UDP）下由 A 板按协议回状态帧。 */
@@ -410,9 +472,10 @@ static void meas_analog(const uint16_t *buf, uint16_t *vpp_mv, uint32_t *freq_hz
   uint32_t dt = cur_dt_us();
 
   for (k = 0; k < TOTAL_PTS; k++) {
-    uint16_t v = buf[idx_of(k)];
+    uint16_t v = buf[k];
     if (v < mn) { mn = v; }
     if (v > mx) { mx = v; }
+    if ((k & 0x3F) == 0) { link_poll(); }   /* 测量只读快照，穿插收包安全 */
   }
 
   *vpp_mv = (uint16_t)(((uint32_t)(mx - mn) * 3300UL) / 4095UL);
@@ -425,8 +488,8 @@ static void meas_analog(const uint16_t *buf, uint16_t *vpp_mv, uint32_t *freq_hz
 
   mid = (uint16_t)(((uint32_t)mn + mx) / 2U);
   for (k = 1; k < TOTAL_PTS; k++) {
-    uint16_t p = buf[idx_of((uint16_t)(k - 1))];
-    uint16_t c = buf[idx_of(k)];
+    uint16_t p = buf[(uint16_t)(k - 1)];
+    uint16_t c = buf[k];
     if (p < mid && c >= mid) {                 /* 中点上升穿越 */
       if (last_rise >= 0) {
         sum_pts += (uint32_t)((int32_t)k - last_rise);
@@ -453,11 +516,11 @@ static void meas_digital(uint8_t mask, uint32_t *freq_hz, uint32_t *pw_us)
   uint8_t  prev;
   uint32_t dt = cur_dt_us();
 
-  prev = (dig[idx_of(0)] & mask) ? 1 : 0;
+  prev = (s_lind[0] & mask) ? 1 : 0;
   if (prev) { high_len = 1; }
 
   for (k = 1; k < TOTAL_PTS; k++) {
-    uint8_t cur = (dig[idx_of(k)] & mask) ? 1 : 0;
+    uint8_t cur = (s_lind[k] & mask) ? 1 : 0;
 
     if (cur && !prev) {                        /* 上升沿 */
       if (last_rise >= 0) {
@@ -494,14 +557,17 @@ static void draw_grid(void)
   for (i = 0; i <= DIV_X; i++) {
     int x = i * (SCR_W - 1) / DIV_X;
     GUI_DrawVLine(x, WAVE_Y0, WAVE_Y0 + WAVE_H);
+    link_poll();
   }
   for (i = 0; i <= 8; i++) {
     int y = WAVE_Y0 + i * WAVE_H / 8;
     GUI_DrawHLine(y, 0, SCR_W - 1);
+    link_poll();
   }
   for (i = 0; i <= 3; i++) {
     int y = DIG_Y0 + i * DIG_LANE_H;
     GUI_DrawHLine(y, 0, SCR_W - 1);
+    link_poll();
   }
 }
 
@@ -528,7 +594,7 @@ static void draw_analog(const uint16_t *buf, GUI_COLOR color)
   }
 
   for (i = 0; i < TOTAL_PTS; i++) {
-    int y = raw12_to_y(buf[idx_of((uint16_t)i)]);
+    int y = raw12_to_y(buf[i]);
 
     col = idx_to_x(i);
     if (s_col_min[col] < 0) {
@@ -562,6 +628,10 @@ static void draw_analog(const uint16_t *buf, GUI_COLOR color)
       fb_vline(col, lo, hi, c);
 
       prev_y = (s_col_min[col] + s_col_max[col]) / 2;
+
+      if ((col & 0x1F) == 0) {
+        link_poll();            /* 每 32 列让出一次收包机会 */
+      }
     }
   }
 }
@@ -597,7 +667,7 @@ static void draw_digital(void)
       /* 该像素列对应的采样点（与 idx_to_x 互逆，四舍五入） */
       uint16_t k = (uint16_t)(((uint32_t)colx * (TOTAL_PTS - 1) + (SCR_W - 1) / 2) /
                               (SCR_W - 1));
-      int y = (dig[idx_of(k)] & bitm[ch]) ? y_hi : y_lo;
+      int y = (s_lind[k] & bitm[ch]) ? y_hi : y_lo;
 
       if (run_y < 0) {
         run_y = y;
@@ -607,6 +677,10 @@ static void draw_digital(void)
         fb_vline(colx, run_y, y, c);        /* 跳变沿 */
         run_y = y;
         run_start = colx;
+      }
+
+      if ((colx & 0x1F) == 0) {
+        link_poll();            /* 每 32 列让出一次收包机会 */
       }
     }
     fb_hline(run_start, SCR_W - 1, run_y, c);
@@ -637,6 +711,8 @@ static void draw_button(int x0, int y0, int x1, int y1,
   GUI_DispStringAt(label,
                    x0 + ((x1 - x0 + 1) - strlen_(label) * 8) / 2,
                    y0 + 1);
+
+  link_poll();            /* 顶栏 9 个按钮逐个让出收包机会 */
 }
 
 static void draw_topbar(uint32_t frame, uint8_t ts_ok, uint8_t link_ok)
@@ -687,10 +763,22 @@ static void draw_topbar(uint32_t frame, uint8_t ts_ok, uint8_t link_ok)
     GUI_DispDecAt((I32)touch_error(), 386, 2, 1);
   }
 
-  /* 数据源：S=假数据自测，U=USART6 实时，E=以太网 UDP，L=链路断开 */
+  /* 数据源/链路状态：
+       S=假数据自测  U=USART6 有数据  E=以太网有数据
+       P=以太网 PHY 已 link 但 500ms 内没收到有效帧（A 没发包 / IP 不通 / 端口不对）
+       L=以太网 PHY 未 link（网线没插、对端没上电）
+     P 和 L 分开，联调时能一眼判断是物理层还是数据层的问题。 */
 #if defined(RX_SOURCE_UDP)
-  GUI_SetColor(link_ok ? GUI_GREEN : GUI_RED);
-  GUI_DispStringAt(link_ok ? "E" : "L", 392, 2);
+  if (link_ok) {
+    GUI_SetColor(GUI_GREEN);
+    GUI_DispStringAt("E", 392, 2);
+  } else if (g_last_phy_up) {
+    GUI_SetColor(GUI_ORANGE);
+    GUI_DispStringAt("P", 392, 2);
+  } else {
+    GUI_SetColor(GUI_RED);
+    GUI_DispStringAt("L", 392, 2);
+  }
 #elif defined(RX_SOURCE_UART)
   GUI_SetColor(link_ok ? GUI_GREEN : GUI_RED);
   GUI_DispStringAt(link_ok ? "U" : "L", 392, 2);
@@ -794,6 +882,7 @@ static void draw_trig_level(void)
     int xe = x + 3;
     if (xe > SCR_W - 1) { xe = SCR_W - 1; }
     GUI_DrawHLine((int)y, x, xe);
+    link_poll();
   }
 
   /* 右侧 T 标记：黑底保证压在波形上也读得清 */
@@ -821,6 +910,8 @@ static void axis_text(int x, int y, const char *s, GUI_COLOR c)
   GUI_SetColor(c);
   GUI_DispStringAt(s, x, y);
   GUI_SetTextMode(GUI_TM_TRANS);
+
+  link_poll();
 }
 
 static void draw_axis(void)
@@ -862,8 +953,8 @@ static void draw_meas(void)
     return;
   }
 
-  if (m & MASK_CH1) { meas_analog(ch1, &vpp1, &f1); }
-  if (m & MASK_CH2) { meas_analog(ch2, &vpp2, &f2); }
+  if (m & MASK_CH1) { meas_analog(s_lin1, &vpp1, &f1); }
+  if (m & MASK_CH2) { meas_analog(s_lin2, &vpp2, &f2); }
 
   /* 行 1：模拟通道（频率为 0 表示窗口内周期不足，显示 --- 避免误读） */
   GUI_SetColor(GUI_BLUE);
@@ -896,6 +987,8 @@ static void draw_meas(void)
   for (ch = 0; ch < 3; ch++) {
     int x = 2 + ch * 158;
     uint8_t on = (m & (MASK_D1 << ch)) ? 1 : 0;
+
+    link_poll();
 
     GUI_SetColor((ch == 0) ? GUI_GREEN : (ch == 1) ? GUI_YELLOW : GUI_MAGENTA);
     GUI_DispStringAt("D", x, MEAS_Y0 + 11);
@@ -939,6 +1032,8 @@ static void draw_link_stats(void)
   GUI_SetColor(st->crc_err ? GUI_RED : GUI_GRAY);
   GUI_DispDecAt((I32)st->crc_err, 78, 264, 4);
 
+  link_poll();
+
   GUI_SetColor(GUI_DARKGRAY);
   GUI_DispStringAt("DROP", 108, 264);
   GUI_SetColor(st->drop ? GUI_YELLOW : GUI_GRAY);
@@ -961,6 +1056,8 @@ static void draw_link_stats(void)
   GUI_SetColor(g_fps >= 20 ? GUI_GREEN : GUI_ORANGE);
   GUI_DispDecAt((I32)g_fps, 276, 264, 3);
 
+  link_poll();
+
   /* 临时性能诊断：B/W/T/E 四阶段耗时(ms) */
   GUI_SetFont(&GUI_Font6x8);
   GUI_SetColor(GUI_DARKGRAY);  GUI_DispStringAt("B", 300, 264);
@@ -971,6 +1068,8 @@ static void draw_link_stats(void)
   GUI_SetColor(GUI_WHITE);     GUI_DispDecAt((I32)g_dbg_t[2], 346, 264, 2);
   GUI_SetColor(GUI_DARKGRAY);  GUI_DispStringAt("E", 360, 264);
   GUI_SetColor(GUI_WHITE);     GUI_DispDecAt((I32)g_dbg_t[3], 366, 264, 2);
+
+  link_poll();
 
   /* A 板状态帧回执（验收记录用，无需挂调试器）：
      ST = 有效状态帧累计数，G = 状态帧 GEAR，M = 状态帧 CH_MASK（十六进制）。
@@ -1025,6 +1124,8 @@ static void draw_key(int x0, int y0, int x1, int y1, const char *label, GUI_COLO
   GUI_SetTextMode(GUI_TM_TRANS);
   GUI_SetColor(GUI_BLACK);
   GUI_DispStringAt(label, x0 + ((x1 - x0 + 1) - strlen_(label) * 8) / 2, y0 + 9);
+
+  link_poll();            /* 键盘/触发面板/导出菜单的按键逐个让出收包 */
 }
 
 static void draw_keypad(void)
@@ -1316,17 +1417,13 @@ static uint8_t handle_trig_tap(uint16_t x, uint16_t y)
    点击顶栏 SAVE 弹出，选择导出 CSV 或 BMP。
    导出数据经 USART1（ST-Link 虚拟串口）发到 PC。
 --------------------------------------------------------- */
-/* 导出用的线性副本（环形缓冲 → 时间顺序） */
-static uint16_t s_lin1[TOTAL_PTS];
-static uint16_t s_lin2[TOTAL_PTS];
-static uint8_t  s_lind[TOTAL_PTS];
-
 static void make_linear_copy(void)
 {
+  uint16_t base = wpos;
   uint16_t i;
 
   for (i = 0; i < TOTAL_PTS; i++) {
-    uint16_t j = idx_of(i);
+    uint16_t j = (uint16_t)((base + i) % TOTAL_PTS);
     s_lin1[i] = ch1[j];
     s_lin2[i] = ch2[j];
     s_lind[i] = dig[j];
@@ -1535,21 +1632,26 @@ static void draw_screen(void)
   t0 = HAL_GetTick();
   GUI_MULTIBUF_Begin();
   fb_setup();             /* 取本次绘制的后台缓冲地址（波形直写用） */
+  make_linear_copy();     /* 定格本帧数据：绘制期间收包不再影响画面 */
   t1 = HAL_GetTick();
 
   GUI_SetBkColor(GUI_BLACK);
-  GUI_Clear();
+  fb_clear();             /* 清屏直写帧缓冲，内部每 32 行让出一次收包 */
   draw_grid();
-  if (cur_mask() & MASK_CH1) { draw_analog(ch1, GUI_BLUE); }
-  if (cur_mask() & MASK_CH2) { draw_analog(ch2, GUI_RED);  }
+  if (cur_mask() & MASK_CH1) { draw_analog(s_lin1, GUI_BLUE); }
+  if (cur_mask() & MASK_CH2) { draw_analog(s_lin2, GUI_RED);  }
   draw_digital();
   draw_trig_level();      /* 触发电平虚线，压在波形之上 */
   t2 = HAL_GetTick();
 
   draw_axis();            /* 坐标轴标签最后画，带黑底保证可读 */
+  link_poll();
   draw_topbar(g_last_frame, g_last_ts_ok, g_last_link_ok);
+  link_poll();
   draw_meas();
+  link_poll();
   draw_link_stats();      /* 底部 8px 链路统计条 */
+  link_poll();
   draw_keypad();          /* 键盘弹出时覆盖在波形之上 */
   draw_menu();            /* 导出菜单放在最上层 */
   draw_trig_panel();      /* 触发设置面板 */
@@ -1750,6 +1852,9 @@ void MainTask(void)
       g_last_frame   = frame;
       g_last_ts_ok   = ts_ok;
       g_last_link_ok = link_ok;
+#if defined(RX_SOURCE_UDP)
+      g_last_phy_up  = phy_up_prev;
+#endif
       draw_screen();
 
       frame++;
