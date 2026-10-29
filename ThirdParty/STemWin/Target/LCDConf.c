@@ -611,13 +611,25 @@ static U32 GetBufferSize(U32 LayerIndex)
   * @retval None.
   */
 static void CUSTOM_CopyBuffer(int LayerIndex, int IndexSrc, int IndexDst) {
-  U32 BufferSize, AddrSrc, AddrDst;
+  /* 应用层每帧先 GUI_Clear() 再整屏重绘，上一帧内容没有复用价值。
+     原先这里用 DMA2D 把 480×272×4 ≈ 522KB 从显示缓冲拷到后台缓冲，
+     实测 15ms/帧，是 15fps 的最大单笔开销。
+     跳过拷贝，只切换绘制缓冲索引；显示时序仍由 LTDC 行中断在 VSYNC 处切换，
+     不会撕裂。若以后改成"只重画局部"，需要把整屏拷贝恢复。 */
+  (void)IndexSrc;
+  (void)IndexDst;
 
-  BufferSize = GetBufferSize(LayerIndex);
-  AddrSrc    = layer_prop[LayerIndex].address + BufferSize * IndexSrc;
-  AddrDst    = layer_prop[LayerIndex].address + BufferSize * IndexDst;
-  DMA2D_CopyBuffer(LayerIndex, (void *)AddrSrc, (void *)AddrDst, layer_prop[LayerIndex].xSize, layer_prop[LayerIndex].ySize, 0, 0);
   layer_prop[LayerIndex].buffer_index = IndexDst;
+}
+
+/**
+  * @brief  返回当前后台绘制缓冲的起始地址（ARGB8888）
+  * @note   应用层波形绘制直接写这块内存，绕过 emWin 逐点调用的开销。
+  *         必须在 GUI_MULTIBUF_Begin() 之后调用，保证地址与驱动当前缓冲一致。
+  */
+U32 LCDConf_GetDrawBufferAddr(void)
+{
+  return layer_prop[0].address + GetBufferSize(0) * (U32)layer_prop[0].buffer_index;
 }
 
 /**

@@ -285,6 +285,62 @@ static uint32_t cur_dt_us(void)
   return (g < 5) ? dt_us_tab[g] : dt_us_tab[0];
 }
 
+/* ---------------- 波形直接写帧缓冲 ----------------
+   emWin 在 32bpp 非缓存 SDRAM 上逐点/逐列调用约 0.75us/像素，5 路 500 点合计
+   30~40ms，是 15fps 的主要来源。波形只有 5 种纯色、且每帧整屏重绘，因此
+   直接对当前后台缓冲做 32 位写入，同一画面降到 1~2ms。
+   颜色换算：GUI_COLOR 是 0x00BBGGRR，帧缓冲是 0xAARRGGBB（见 export.c 的 BMP 解码）。
+   栅格、文字、弹出层仍然走 emWin，它们写在波形之后。 */
+extern uint32_t LCDConf_GetDrawBufferAddr(void);
+
+#define FB_PIX(c) (0xFF000000UL | (((uint32_t)(c) & 0x0000FFUL) << 16) | \
+                   ((uint32_t)(c) & 0x00FF00UL) |                         \
+                   (((uint32_t)(c) >> 16) & 0x000000FFUL))
+
+static uint32_t *s_fb;              /* 当前后台绘制缓冲（MULTIBUF_Begin 之后有效） */
+
+static void fb_setup(void)
+{
+  s_fb = (uint32_t *)LCDConf_GetDrawBufferAddr();
+}
+
+static void fb_vline(int x, int y0, int y1, uint32_t c)
+{
+  uint32_t *p;
+  int y;
+
+  if (x < 0 || x >= SCR_W) {
+    return;
+  }
+  if (y0 > y1) { int t = y0; y0 = y1; y1 = t; }
+  if (y0 < 0) { y0 = 0; }
+  if (y1 > SCR_H - 1) { y1 = SCR_H - 1; }
+
+  p = s_fb + (uint32_t)y0 * SCR_W + (uint32_t)x;
+  for (y = y0; y <= y1; y++) {
+    *p = c;
+    p += SCR_W;
+  }
+}
+
+static void fb_hline(int x0, int x1, int y, uint32_t c)
+{
+  uint32_t *p;
+  int x;
+
+  if (y < 0 || y >= SCR_H) {
+    return;
+  }
+  if (x0 > x1) { int t = x0; x0 = x1; x1 = t; }
+  if (x0 < 0) { x0 = 0; }
+  if (x1 > SCR_W - 1) { x1 = SCR_W - 1; }
+
+  p = s_fb + (uint32_t)y * SCR_W + (uint32_t)x0;
+  for (x = x0; x <= x1; x++) {
+    *p++ = c;
+  }
+}
+
 #ifndef RX_SOURCE_LINK
 /* 假数据源模式：没有 A 板，直接伪造一帧状态帧，让触发面板能看到回执。
    真实链路（UART/UDP）下由 A 板按协议回状态帧。 */
@@ -455,8 +511,8 @@ static void draw_grid(void)
    改为「每像素列一次竖直填充」：
      - 500 个采样点映射到 480 列，同列多点取 min/max（等价于真实示波器的包络）
      - 与上一列的连接点合并，保证跨列不断线
-     - 每次 GUI_FillRect 走 LCDConf 里注册的 DMA2D 填充，硬件完成
-   实测填充 480 列 × 2 路只需几毫秒，画面形态与原折线一致。
+     - 填充直接写帧缓冲（见 fb_vline），不再经 emWin/DMA2D 逐列调用
+   画面形态与原折线一致，耗时从几十毫秒降到 1ms 量级。
 --------------------------------------------------------- */
 static int16_t s_col_min[SCR_W];
 static int16_t s_col_max[SCR_W];
@@ -484,46 +540,37 @@ static void draw_analog(const uint16_t *buf, GUI_COLOR color)
     }
   }
 
-  GUI_SetColor(color);
+  {
+    uint32_t c = FB_PIX(color);
 
-  for (col = 0; col < SCR_W; col++) {
-    int lo, hi;
+    for (col = 0; col < SCR_W; col++) {
+      int lo, hi;
 
-    if (s_col_min[col] < 0) {
-      continue;
+      if (s_col_min[col] < 0) {
+        continue;
+      }
+
+      lo = s_col_min[col];
+      hi = s_col_max[col];
+
+      /* 与上一列的端点相连，跨列不出现断点 */
+      if (prev_y >= 0) {
+        if (prev_y < lo) { lo = prev_y; }
+        if (prev_y > hi) { hi = prev_y; }
+      }
+
+      fb_vline(col, lo, hi, c);
+
+      prev_y = (s_col_min[col] + s_col_max[col]) / 2;
     }
-
-    lo = s_col_min[col];
-    hi = s_col_max[col];
-
-    /* 与上一列的端点相连，跨列不出现断点 */
-    if (prev_y >= 0) {
-      if (prev_y < lo) { lo = prev_y; }
-      if (prev_y > hi) { hi = prev_y; }
-    }
-
-    GUI_FillRect(col, lo, col, hi);
-
-    prev_y = (s_col_min[col] + s_col_max[col]) / 2;
   }
 }
 
 /* ---------------- 数字通道 ----------------
    画法：低电平画在泳道底部，高电平画在泳道顶部，跳变沿用竖线连接。
-   注意：GUI_DrawVLine(x, y0, y1) 要求 y0 <= y1，参数必须有序，
-   否则上升沿（从低到高）会画不出来。这里统一做一次大小交换。 */
-static void vline_ordered(int x, int y0, int y1)
-{
-  int t;
-
-  if (y0 > y1) {
-    t  = y0;
-    y0 = y1;
-    y1 = t;
-  }
-  GUI_DrawVLine(x, y0, y1);
-}
-
+   按屏幕列取电平，把连续同电平合并成一段后直接写帧缓冲：
+   原来 500 个采样点逐个调 GUI_DrawHLine（一帧三路约 1800 次 emWin 调用），
+   合并后每路只剩"电平段数 + 跳变沿数"，且走 32 位直写，耗时降到 1ms 以内。 */
 static void draw_digital(void)
 {
   static const GUI_COLOR col[3]  = { GUI_GREEN, GUI_YELLOW, GUI_MAGENTA };
@@ -535,8 +582,8 @@ static void draw_digital(void)
     int lane = DIG_Y0 + ch * DIG_LANE_H;
     int y_hi = lane + 4;
     int y_lo = lane + DIG_LANE_H - 6;
-    int i, prev_y;
-    int x_prev = 0;
+    uint32_t c = FB_PIX(col[ch]);
+    int colx, run_start = 0, run_y = -1;
 
     /* 通道关闭时不绘制。
        注意：开关判据用 CH_MASK 位（MASK_D1<<ch），取电平用 DIG 位（bitm[ch]）。
@@ -546,24 +593,23 @@ static void draw_digital(void)
       continue;
     }
 
-    GUI_SetColor(col[ch]);
+    for (colx = 0; colx < SCR_W; colx++) {
+      /* 该像素列对应的采样点（与 idx_to_x 互逆，四舍五入） */
+      uint16_t k = (uint16_t)(((uint32_t)colx * (TOTAL_PTS - 1) + (SCR_W - 1) / 2) /
+                              (SCR_W - 1));
+      int y = (dig[idx_of(k)] & bitm[ch]) ? y_hi : y_lo;
 
-    for (i = 0; i < TOTAL_PTS; i++) {
-      int xi = idx_to_x(i);
-      int y  = (dig[idx_of((uint16_t)i)] & bitm[ch]) ? y_hi : y_lo;
-
-      if (i == 0) {
-        prev_y = y;
-      } else if (y != prev_y) {
-        /* 跳变沿：画在当前列，保证 y0<=y1 */
-        vline_ordered(xi, prev_y, y);
-        GUI_DrawHLine(y, x_prev, xi);
-        prev_y = y;
-      } else {
-        GUI_DrawHLine(y, x_prev, xi);
+      if (run_y < 0) {
+        run_y = y;
+        run_start = colx;
+      } else if (y != run_y) {
+        fb_hline(run_start, colx - 1, run_y, c);
+        fb_vline(colx, run_y, y, c);        /* 跳变沿 */
+        run_y = y;
+        run_start = colx;
       }
-      x_prev = xi;
     }
+    fb_hline(run_start, SCR_W - 1, run_y, c);
   }
 }
 
@@ -1488,6 +1534,7 @@ static void draw_screen(void)
 
   t0 = HAL_GetTick();
   GUI_MULTIBUF_Begin();
+  fb_setup();             /* 取本次绘制的后台缓冲地址（波形直写用） */
   t1 = HAL_GetTick();
 
   GUI_SetBkColor(GUI_BLACK);
@@ -1520,7 +1567,8 @@ static void draw_screen(void)
 /* ---------------- 主任务 ----------------
    循环不再用 HAL_Delay(50) 阻塞：以太网是轮询模式，必须高频调用
    MX_LWIP_Process() 才能及时取走 DMA 里的帧（1ms 档 A 板每秒发 1000 帧）。
-   因此改成「数据入口每轮都转，渲染按 50ms 节拍做」，屏幕仍是 20 帧/s。
+   因此改成「数据入口每轮都转，渲染按 40ms 节拍做」，屏幕约 25 帧/s
+   （任务书提高部分要求 ≥20 帧/s，留 5 帧余量）。
 --------------------------------------------------------- */
 void MainTask(void)
 {
@@ -1694,9 +1742,9 @@ void MainTask(void)
     }
 #endif
 
-    /* --- 渲染：50ms 节拍 = 20 帧/s，与数据入口解耦 ---
-       若单次绘制耗时超过 50ms，实际帧率会低于 20，屏上 FPS 会给出实测值。 */
-    if ((uint32_t)(HAL_GetTick() - last_draw) >= 50) {
+    /* --- 渲染：40ms 节拍 = 25 帧/s，与数据入口解耦，给"≥20fps"留余量 ---
+       若单次绘制耗时超过 40ms，实际帧率会低于 25，屏上 FPS 会给出实测值。 */
+    if ((uint32_t)(HAL_GetTick() - last_draw) >= 40) {
       last_draw = HAL_GetTick();
 
       g_last_frame   = frame;
