@@ -90,20 +90,30 @@ typedef struct
 #define ETH_RX_BUFFER_CNT             12U
 LWIP_MEMPOOL_DECLARE(RX_POOL, ETH_RX_BUFFER_CNT, sizeof(RxBuff_t), "Zero-copy RX PBUF pool");
 
+/* 单次 ethernetif_input 最多取走的帧数（见文件末尾 ethernetif_input 的说明）。
+   GEAR4 下 A 实测约 1800 帧/秒，而绘制主循环每秒只能插入约 370 次轮询，
+   每次轮询平均只到达 5 帧左右，因此取 16 已有充足余量（16 × 370 ≈ 5900）。
+   真正的吞吐瓶颈是 DMA 接收描述符数量，见 stm32f7xx_hal_conf.h 的 ETH_RX_DESC_CNT。 */
+#define ETH_RX_INPUT_BUDGET           16U
+
 /* Variable Definitions */
 static uint8_t RxAllocStatus;
 
 #if defined ( __ICCARM__ ) /*!< IAR Compiler */
 
+/* ETH_DMADescTypeDef 为 40 字节。RX 描述符 8 个占 0x2004c000~0x2004c13f，
+   因此 Tx 描述符表起始地址必须从 0x2004c0a0 后移到 0x2004c140，否则链接报
+   "absolute section overlaps"。Tx 4 个占 0x2004c140~0x2004c1df，仍在
+   0x20048000 起的 32KB 非缓存 MPU 区内。 */
 #pragma location=0x2004c000
 ETH_DMADescTypeDef  DMARxDscrTab[ETH_RX_DESC_CNT]; /* Ethernet Rx DMA Descriptors */
-#pragma location=0x2004c0a0
+#pragma location=0x2004c140
 ETH_DMADescTypeDef  DMATxDscrTab[ETH_TX_DESC_CNT]; /* Ethernet Tx DMA Descriptors */
 
 #elif defined ( __CC_ARM )  /* MDK ARM Compiler */
 
 __attribute__((at(0x2004c000))) ETH_DMADescTypeDef  DMARxDscrTab[ETH_RX_DESC_CNT]; /* Ethernet Rx DMA Descriptors */
-__attribute__((at(0x2004c0a0))) ETH_DMADescTypeDef  DMATxDscrTab[ETH_TX_DESC_CNT]; /* Ethernet Tx DMA Descriptors */
+__attribute__((at(0x2004c140))) ETH_DMADescTypeDef  DMATxDscrTab[ETH_TX_DESC_CNT]; /* Ethernet Tx DMA Descriptors */
 
 #elif defined ( __GNUC__ ) /* GNU Compiler */
 
@@ -320,6 +330,31 @@ static struct pbuf * low_level_input(struct netif *netif)
   return p;
 }
 
+/* ---- RX DMA 唤醒 ----
+   ETH 接收 DMA 在描述符暂时耗尽（RU，Receive buffer Unavailable）后会挂起，
+   必须重新写 DMARPDR（接收 tail 指针）才能恢复。而 HAL 只在
+   RxBuildDescCnt != 0 时调用 ETH_UpdateDescriptor 去写 DMARPDR，于是
+   "描述符被瞬时耗尽 → 随后 pbuf 全部归还 → RxBuildDescCnt 归零" 这条路径
+   走完后，DMA 永久停在挂起状态：RxAllocStatus=0、RxBuildDescCnt=0 一切正常，
+   却再也收不到一帧（GEAR4 下 100us/帧、4 个描述符只有 400us 余量，必然触发）。
+   这里每次轮询末尾无条件重写一次 tail，代价只有一条寄存器写。 */
+static void eth_rx_kick(void)
+{
+  ETH_DMADescTypeDef *desc;
+  uint32_t tail;
+
+  if (heth.gState != HAL_ETH_STATE_STARTED)
+  {
+    return;
+  }
+
+  tail = (heth.RxDescList.RxBuildDescIdx + ETH_RX_DESC_CNT - 1U) % ETH_RX_DESC_CNT;
+  desc = (ETH_DMADescTypeDef *)heth.Init.RxDesc;
+
+  __DMB();
+  WRITE_REG(heth.Instance->DMARPDR, (uint32_t)(desc + tail));
+}
+
 /**
  * @brief This function should be called when a packet is ready to be read
  * from the interface. It uses the function low_level_input() that
@@ -332,18 +367,26 @@ static struct pbuf * low_level_input(struct netif *netif)
 void ethernetif_input(struct netif *netif)
 {
   struct pbuf *p = NULL;
+  uint32_t budget = ETH_RX_INPUT_BUDGET;
 
-  do
+  /* 原实现是 do/while 无限取包：只要 DMA 里一直有新包就永不返回。
+     GEAR3（500us/帧）、GEAR4（100us/帧）档下包几乎从不间断，主循环会被
+     这个循环独占，界面冻结（实测停在 proto_crc16 且 draw 断点永不命中）。
+     改为每次轮询最多取 ETH_RX_INPUT_BUDGET 帧，剩余留给下一次 link_poll()。 */
+  while (budget-- > 0U)
   {
     p = low_level_input( netif );
-    if (p != NULL)
+    if (p == NULL)
     {
-      if (netif->input( p, netif) != ERR_OK )
-      {
-        pbuf_free(p);
-      }
+      break;
     }
-  } while(p!=NULL);
+    if (netif->input( p, netif) != ERR_OK )
+    {
+      pbuf_free(p);
+    }
+  }
+
+  eth_rx_kick();
 }
 
 #if !LWIP_ARP

@@ -215,6 +215,15 @@
 #define ETH_RXBUFNB                    ((uint32_t)4U)       /* 4 Rx buffers of size ETH_RX_BUF_SIZE  */
 #define ETH_TXBUFNB                    ((uint32_t)4U)       /* 4 Tx buffers of size ETH_TX_BUF_SIZE  */
 
+/* ETH DMA 接收描述符数量。
+   默认 4 个：在 GEAR4（A 侧实测约 1800 帧/秒）下，B 每秒只能插入约 370 次
+   轮询，两者相乘只有 1500 帧/秒的接收能力，剩余帧因描述符耗尽被 DMA 丢弃
+   （屏上 DROP 持续上涨、RX 只有 1700）。
+   提到 8 个后单次轮询可取走 8 帧，上限约 2900 帧/秒，覆盖 A 的发送速率。
+   注意：ETH_DMADescTypeDef 为 40 字节，Rx 描述符表起始 0x2004c000、8 个共
+   320 字节，Tx 描述符表起始地址须相应后移到 0x2004c140（见 ethernetif.c）。 */
+#define ETH_RX_DESC_CNT                8U
+
 /* Section 2: PHY configuration section */
 
 /* LAN8742A PHY Address*/

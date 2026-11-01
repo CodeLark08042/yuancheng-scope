@@ -36,8 +36,8 @@
      都不定义      ：使用板内假数据源 fakesrc，单板即可完整自测波形与测量。
    三条路径共用同一个协议解析器 proto，切换不影响其它任何功能。
    ==================================================== */
-#define RX_SOURCE_UART
-// #define RX_SOURCE_UDP    /* 无网口/U 盘网卡时先注释，用假数据自测 */
+// #define RX_SOURCE_UART
+#define RX_SOURCE_UDP    /* 无网口/U 盘网卡时先注释，用假数据自测 */
 
 #if defined(RX_SOURCE_UART) || defined(RX_SOURCE_UDP)
   #define RX_SOURCE_LINK      /* 有真实对端，不再伪造数据帧与状态帧回执 */
@@ -138,9 +138,31 @@ static uint8_t g_gear = GEAR_10MS;
 #define GEAR_REQ_HOLD_MS  1200
 static uint8_t  g_gear_req      = 0xFF;
 static uint32_t g_gear_req_tick = 0;
+/* 最近一次下发的控制命令，联调时用 Live Watch 核对 B 到底发了什么 */
+static uint8_t  g_last_cmd      = 0xFF;
+static uint16_t g_last_param    = 0;
+/* 档位请求超时未被 A 确认（屏幕档位按钮变红提示） */
+static uint8_t  g_gear_rej      = 0;
+/* 每秒以太网轮询次数：与"单次最多取 8 帧"一起判断能否跟上 A 的发送速率 */
+static uint32_t g_poll_cnt      = 0;
+static uint16_t g_poll_fps      = 0;
 static uint8_t g_mask = MASK_CH1 | MASK_CH2 | MASK_D1 | MASK_D2 | MASK_D3;
 static uint8_t g_touch_down = 0;
 static uint16_t g_wave_freq = 1000;     /* 矩形波频率（Hz），默认 1kHz，范围 100~10000 */
+
+/* ---- 触摸采样服务 ----
+   一帧绘制要 100~200ms，期间主循环回不到顶部；旧写法只在主循环顶部读一次触摸，
+   快速点击（按下-松开都落在绘制窗口内）会被整次丢掉，表现为"按好几次没反应"。
+   现在把采样做成独立服务，绘制里的 link_poll() 也会调用它，最坏延迟只有采样周期。
+   采样只锁存"点击事件"，handle_tap 仍由主循环执行——避免在绘制中途改界面状态
+   （导出菜单会再次进入 draw_screen()，从中途调用会造成重入）。 */
+#define TOUCH_SVC_MS      8U            /* 采样周期(ms)：一次 I2C 读约 0.6ms，8ms 一次对帧率影响很小 */
+static uint32_t s_touch_svc_tick = 0;
+static uint8_t  g_tap_pending    = 0;   /* 已锁存、待主循环执行的点击 */
+static uint16_t g_tap_x          = 0;
+static uint16_t g_tap_y          = 0;
+static int8_t   s_repeat_dir     = 0;
+static uint32_t s_repeat_ms      = 0;
 
 /* ---- 触发设置（本地值；收到 A 板状态帧后以其回执为准） ---- */
 static uint8_t g_trig_src   = 0;        /* 0=OFF 1=CH1 2=CH2 3=D1 4=D2 5=D3 */
@@ -236,6 +258,7 @@ static void ring_push(uint16_t r1, uint16_t r2, uint8_t d)
    半部分会取自不同时刻（画面撕裂、测量值突变）。所以每帧绘制前
    先把窗口定格一次，绘制中进来的新数据留到下一帧。 */
 static void make_linear_copy(void);
+static void touch_service(void);
 
 /* ---------------- 帧入环 ----------------
    由 proto 在每帧 CRC 通过后回调，保证「一次轮询解析出的多帧」全部入环。
@@ -298,7 +321,9 @@ static void link_poll(void)
     return;                     /* 同一毫秒内只轮询一次 */
   }
   s_poll_tick = now;
+  g_poll_cnt++;
   MX_LWIP_Process();
+  touch_service();            /* 绘制期间也保持触摸采样，点击不会被整帧吞掉 */
 }
 #else
 #define link_poll()   do { } while (0)
@@ -427,6 +452,9 @@ static void send_ctrl(uint8_t cmd, uint16_t param)
 {
   uint8_t buf[PROTO_CTRL_LEN];
 
+  g_last_cmd   = cmd;
+  g_last_param = param;
+
   proto_build_ctrl(buf, cmd, param);
 
 #if defined(RX_SOURCE_UDP)
@@ -438,6 +466,22 @@ static void send_ctrl(uint8_t cmd, uint16_t param)
 #ifndef RX_SOURCE_LINK
   fake_status_reply();        /* 自测模式：模拟 A 板回执 */
 #endif
+}
+
+/* 最近一次下发命令的只读访问（联调时 Live Watch 查看 B 实际发出什么） */
+uint8_t  dbg_last_cmd(void)
+{
+  return g_last_cmd;
+}
+
+uint16_t dbg_last_param(void)
+{
+  return g_last_param;
+}
+
+uint16_t dbg_poll_fps(void)
+{
+  return g_poll_fps;
 }
 
 /* 档位按钮：真实链路下按“上次请求值”递增，保证 0~4 都能发出去；
@@ -722,8 +766,9 @@ static void draw_topbar(uint32_t frame, uint8_t ts_ok, uint8_t link_ok)
   uint8_t m = cur_mask();
   char buf[4];
 
-  /* 档位按钮 */
-  draw_button(buttons[0].x0, 0, buttons[0].x1, TOP_H - 2, gear_txt[g], 1, GUI_CYAN);
+  /* 档位按钮：请求被 A 拒绝或超时未确认时变红 */
+  draw_button(buttons[0].x0, 0, buttons[0].x1, TOP_H - 2, gear_txt[g], 1,
+              g_gear_rej ? GUI_RED : GUI_CYAN);
 
   /* 通道按钮 */
   buf[0] = '1'; buf[1] = 0;
@@ -1370,6 +1415,55 @@ static int8_t trig_adj_hit(uint16_t x, uint16_t y)
   return 0;
 }
 
+/* ---------------- 触摸采样服务 ----------------
+   按 TOUCH_SVC_MS 节拍读一次触摸：按下沿锁存一个待执行点击；按住 +/- 时连发。
+   主循环和绘制中的 link_poll() 都会调用它，因此函数自身必须节流且可重入安全
+   （trig_level_step → send_ctrl → link_poll 会回到本函数，节拍已更新后直接返回）。
+--------------------------------------------------------- */
+static void touch_service(void)
+{
+  uint32_t now = HAL_GetTick();
+  uint16_t x, y;
+  int8_t   dir;
+
+  if ((uint32_t)(now - s_touch_svc_tick) < TOUCH_SVC_MS) {
+    return;
+  }
+  s_touch_svc_tick = now;
+
+  if (touch_read(&x, &y)) {
+    if (!g_touch_down) {
+      g_touch_down  = 1;
+      s_repeat_dir  = 0;
+      s_repeat_ms   = 0;
+      /* 已有未执行的点击时不覆盖：宁可晚一点，也不要丢点击 */
+      if (!g_tap_pending) {
+        g_tap_pending = 1;
+        g_tap_x = x;
+        g_tap_y = y;
+      }
+    } else {
+      dir = trig_adj_hit(x, y);
+
+      if (dir == 0) {
+        s_repeat_dir = 0;                 /* 手指移出 +/-：停止连发 */
+        s_repeat_ms  = 0;
+      } else if (dir != s_repeat_dir) {
+        s_repeat_dir = dir;               /* 换到另一个键：重新计时 */
+        s_repeat_ms  = now + 400;
+      } else if (s_repeat_ms != 0 &&
+                 (int32_t)(now - s_repeat_ms) >= 0) {
+        trig_level_step(dir);             /* 按住 400ms 后每 100ms 一步 */
+        s_repeat_ms = now + 100;
+      }
+    }
+  } else {
+    g_touch_down = 0;
+    s_repeat_dir = 0;
+    s_repeat_ms  = 0;
+  }
+}
+
 static uint8_t handle_trig_tap(uint16_t x, uint16_t y)
 {
   /* 面板范围外：关闭 */
@@ -1644,6 +1738,10 @@ static void draw_screen(void)
   draw_trig_level();      /* 触发电平虚线，压在波形之上 */
   t2 = HAL_GetTick();
 
+  /* SDRAM 改成可缓冲写后，直写的像素可能还在写缓冲里；
+     后面的 emWin 文字是"读-改-写"，必须先等前面的写真正落到内存。 */
+  __DSB();
+
   draw_axis();            /* 坐标轴标签最后画，带黑底保证可读 */
   link_poll();
   draw_topbar(g_last_frame, g_last_ts_ok, g_last_link_ok);
@@ -1657,6 +1755,7 @@ static void draw_screen(void)
   draw_trig_panel();      /* 触发设置面板 */
   t3 = HAL_GetTick();
 
+  __DSB();                /* 写缓冲排空后再切页，避免半帧上屏 */
   GUI_MULTIBUF_End();
 
   /* 临时性能诊断：B=Begin（缓冲区拷贝），W=清屏+波形，T=文字/控件，E=End（等 VSYNC） */
@@ -1682,9 +1781,10 @@ void MainTask(void)
   uint32_t last_fake = 0;
 #endif
   uint32_t frame = 0;
-  uint16_t tx, ty;
   uint8_t  ts_ok;
   uint8_t  key_prev = 0;
+  uint32_t key_tick = 0;
+  uint8_t  key_long = 0;
   uint32_t last_good = 0;
   uint32_t last_status = 0;
   uint32_t last_good_tick = 0;
@@ -1692,9 +1792,7 @@ void MainTask(void)
   uint32_t fps_cnt = 0;
   uint32_t fps_tick = 0;
   uint32_t rx_prev = 0;
-  uint32_t repeat_ms = 0;
   uint8_t  link_ok = 1;
-  int8_t   repeat_dir = 0;
 #if defined(RX_SOURCE_UDP)
   uint8_t  phy_up_prev = 0;
 #endif
@@ -1735,6 +1833,7 @@ void MainTask(void)
   for (;;) {
     /* --- 数据入口（每轮都转，频率远高于渲染） --- */
 #if defined(RX_SOURCE_UDP)
+    g_poll_cnt++;
     MX_LWIP_Process();          /* 轮询以太网：收包在回调里喂给 proto_feed */
 #elif defined(RX_SOURCE_UART)
     uart_rx_poll(proto_feed);
@@ -1751,52 +1850,45 @@ void MainTask(void)
     }
 #endif
 
-    /* --- 触摸：按下沿触发一次；停在触发面板电平 +/- 上则连发 --- */
-    {
-      if (touch_read(&tx, &ty)) {
-        if (!g_touch_down) {
-          g_touch_down = 1;
-          repeat_dir = 0;
-          repeat_ms  = 0;
-          handle_tap(tx, ty);
-        } else {
-          int8_t   dir = trig_adj_hit(tx, ty);
-          uint32_t now = HAL_GetTick();
-
-          if (dir == 0) {
-            repeat_dir = 0;                 /* 手指移出 +/-：停止连发 */
-            repeat_ms  = 0;
-          } else if (dir != repeat_dir) {
-            repeat_dir = dir;               /* 换到另一个键：重新计时 */
-            repeat_ms  = now + 400;
-          } else if (repeat_ms != 0 &&
-                     (int32_t)(now - repeat_ms) >= 0) {
-            trig_level_step(dir);           /* 按住 400ms 后每 100ms 一步 */
-            repeat_ms = now + 100;
-          }
-        }
-      } else {
-        g_touch_down = 0;
-        repeat_dir = 0;
-        repeat_ms  = 0;
-      }
+    /* --- 触摸：采样在 touch_service() 内完成（绘制期间由 link_poll 驱动），
+           这里只把锁存下来的点击交给 handle_tap 执行。 --- */
+    touch_service();
+    if (g_tap_pending) {
+      g_tap_pending = 0;
+      handle_tap(g_tap_x, g_tap_y);
     }
 
-    /* --- 板载按键 B1：按一次切换一个档位 --- */
+    /* --- 板载按键 B1：短按切档；长按 1 秒直接指定 GEAR4 ---
+       长按入口用于采集端做高速档（100us/点）性能验证：它直接发
+       CMD01 参数=4，不依赖数据帧回显的当前档位，采集端停发时也能用。 */
     {
       uint8_t key = (HAL_GPIO_ReadPin(GPIOI, GPIO_PIN_11) == GPIO_PIN_SET) ? 1 : 0;
+
       if (key && !key_prev) {
+        key_tick = HAL_GetTick();
+        key_long = 0;
+      } else if (key && !key_long &&
+                 (uint32_t)(HAL_GetTick() - key_tick) >= 1000U) {
+        key_long        = 1;
+        g_gear_req      = GEAR_100US;
+        g_gear_req_tick = HAL_GetTick();
+        send_ctrl(CMD_GEAR, GEAR_100US);
+      } else if (!key && key_prev && !key_long) {
         gear_next();
       }
       key_prev = key;
     }
 
-    /* --- A 板状态帧回执：以其为准同步触发配置 --- */
+    /* --- A 板状态帧回执：以其为准同步触发配置与矩形波频率 --- */
     if (proto_status()->valid && proto_status()->count != last_status) {
       last_status  = proto_status()->count;
       g_trig_src   = proto_status()->trig_src;
       g_trig_mode  = proto_status()->trig_mode;
       g_trig_level = proto_status()->trig_level;
+      /* 矩形波频率同样以 A 板回执为准：按 F+/F- 下发 CMD07 后，
+         若 A 未执行，顶栏 W 会在下一帧状态帧到来时跳回 A 的实际值，
+         屏幕即可反映命令是否生效，无需连调试器或抓包 */
+      g_wave_freq  = proto_status()->wave_freq;
     }
 
 #if defined(RX_SOURCE_LINK)
@@ -1807,12 +1899,15 @@ void MainTask(void)
     }
 
     /* 档位请求确认：A 回显等于请求值 = 切换成功，立即清掉；
-       超过 GEAR_REQ_HOLD_MS 仍未回显 = A 安全拒绝，下次按键从 A 的实际档位重新递增。 */
+       超过 GEAR_REQ_HOLD_MS 仍未回显 = A 未执行或未回状态帧（A 在故障锁存时
+       按设计不发状态帧），此时把档位按钮标红，避免"按了没反应又不知道原因"。 */
     if (g_gear_req != 0xFF) {
       if (proto_stat()->gear == g_gear_req) {
         g_gear_req = 0xFF;
+        g_gear_rej = 0;
       } else if ((uint32_t)(HAL_GetTick() - g_gear_req_tick) >= GEAR_REQ_HOLD_MS) {
         g_gear_req = 0xFF;
+        g_gear_rej = 1;
       }
     }
 #endif
@@ -1873,6 +1968,10 @@ void MainTask(void)
         /* 接收帧率：有效数据帧增量 / 实际经过时间（A 发了多少、B 收到多少，联调必需） */
         g_rx_fps = (uint16_t)(((proto_stat()->good - rx_prev) * 1000U) / dt);
         rx_prev  = proto_stat()->good;
+
+        /* 以太网轮询频率：单次最多取 8 帧，8 × 该值 需大于 A 的发送帧率 */
+        g_poll_fps = (uint16_t)((g_poll_cnt * 1000U) / dt);
+        g_poll_cnt = 0;
 
         fps_cnt  = 0;
         fps_tick = now;

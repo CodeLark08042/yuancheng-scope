@@ -214,7 +214,11 @@ static void MPU_Config_App(void)
   MPU_InitStruct.DisableExec      = MPU_INSTRUCTION_ACCESS_ENABLE;
   MPU_InitStruct.IsShareable      = MPU_ACCESS_NOT_SHAREABLE;
   MPU_InitStruct.IsCacheable      = MPU_ACCESS_NOT_CACHEABLE;
-  MPU_InitStruct.IsBufferable     = MPU_ACCESS_NOT_BUFFERABLE;
+  /* 可缓冲(B=1)：整屏清屏要写 13 万个 32 位字，非缓冲时每个写都要等 SDRAM
+     事务完成，一帧光清屏就 20ms 以上；可缓冲后写操作进入写缓冲连续发出，
+     由 SDRAM 控制器并行排空。仍是非缓存，LTDC/DMA2D 读到的就是内存里的数据；
+     切页前用 __DSB() 保证写缓冲已排空，不会把半帧送上屏。 */
+  MPU_InitStruct.IsBufferable     = MPU_ACCESS_BUFFERABLE;
   HAL_MPU_ConfigRegion(&MPU_InitStruct);
 
   /* Region 2：以太网专用区 0x20048000 起 32KB，非缓存。

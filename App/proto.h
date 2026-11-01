@@ -131,6 +131,7 @@ int      proto_frame_ready(void);     /* 是否有新的有效数据帧 */
 const proto_frame_t *proto_frame(void);
 proto_stat_t *proto_stat(void);
 const proto_status_t *proto_status(void);   /* 最近一次状态帧（A 板回执） */
+const uint8_t *proto_status_raw(void);      /* 最近一次状态帧的原始 12 字节（联调核对用） */
 
 /* 组一帧控制帧（B→A），返回帧长（9） */
 uint16_t proto_build_ctrl(uint8_t *out, uint8_t cmd, uint16_t param);
