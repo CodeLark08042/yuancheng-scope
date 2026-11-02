@@ -148,8 +148,10 @@
 #define  VDD_VALUE                    3300U /*!< Value of VDD in mv */
 #define  TICK_INT_PRIORITY            ((uint32_t)15U) /*!< tick interrupt priority */
 #define  USE_RTOS                     0U
-#define  PREFETCH_ENABLE              0U
-#define  ART_ACCELERATOR_ENABLE        0U /* To enable instruction cache and prefetch */
+/* 这两项必须为 1：216MHz 下 FLASH_LATENCY_7，取指要靠 ART/预取兜住，
+   否则 proto_feed 这种紧密循环会被 Flash 等待周期拖慢数倍。 */
+#define  PREFETCH_ENABLE              1U
+#define  ART_ACCELERATOR_ENABLE        1U /* To enable instruction cache and prefetch */
 
 #define  USE_HAL_ADC_REGISTER_CALLBACKS         0U /* ADC register callback disabled       */
 #define  USE_HAL_CAN_REGISTER_CALLBACKS         0U /* CAN register callback disabled       */
@@ -216,13 +218,14 @@
 #define ETH_TXBUFNB                    ((uint32_t)4U)       /* 4 Tx buffers of size ETH_TX_BUF_SIZE  */
 
 /* ETH DMA 接收描述符数量。
-   默认 4 个：在 GEAR4（A 侧实测约 1800 帧/秒）下，B 每秒只能插入约 370 次
-   轮询，两者相乘只有 1500 帧/秒的接收能力，剩余帧因描述符耗尽被 DMA 丢弃
-   （屏上 DROP 持续上涨、RX 只有 1700）。
-   提到 8 个后单次轮询可取走 8 帧，上限约 2900 帧/秒，覆盖 A 的发送速率。
-   注意：ETH_DMADescTypeDef 为 40 字节，Rx 描述符表起始 0x2004c000、8 个共
-   320 字节，Tx 描述符表起始地址须相应后移到 0x2004c140（见 ethernetif.c）。 */
-#define ETH_RX_DESC_CNT                8U
+   GEAR4（100 us 档、10000 帧/秒）下主循环每秒约轮询 1000 次（link_poll 每毫秒
+   一次），单次轮询能取走的帧数不超过描述符数，因此接收上限 ≈ 描述符数 × 1000。
+   4 个只有 4000 帧/秒、8 个约 8000 帧/秒，都低于 10000，描述符耗尽后 DMA 直接
+   丢帧（屏上 DROP 持续上涨）。取 16 个 → 16000 帧/秒，留 60% 余量。
+   注意：ETH_DMADescTypeDef 为 40 字节，Rx 描述符表起始 0x2004c000、16 个共
+   640 字节（0x280），Tx 描述符表起始地址须相应后移到 0x2004c280（见 ethernetif.c）。
+   改这里必须同步 ethernetif.c 的 ETH_RX_BUFFER_CNT（须在 16~32 之间）。 */
+#define ETH_RX_DESC_CNT                16U
 
 /* Section 2: PHY configuration section */
 

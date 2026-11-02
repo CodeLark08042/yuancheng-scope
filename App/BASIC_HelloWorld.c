@@ -43,6 +43,48 @@
   #define RX_SOURCE_LINK      /* 有真实对端，不再伪造数据帧与状态帧回执 */
 #endif
 
+/* ==================== 假帧压力测试 ====================
+   仅在自测模式（上面两个 RX_SOURCE_* 都注释掉）下生效，用于回答
+   「A 把发送修到 10000 帧/秒之后，B 到底接不接得住」。
+     0：关闭，维持原行为（每 50ms 一帧，20 帧/秒）
+     1：按当前档位满速造帧。周期 = dt_us × 50 点，G4 即 100µs/帧 = 10000 帧/秒
+     2：不限速。主循环能造多快就造多快，直接读出 B 的处理上限
+     3：只测解析+入环。开机造一帧后反复喂同一块缓冲区，不含 fakesrc 造帧开销。
+        和 2 对照即可把「造帧」与「解析+入环」两段成本分开：若 3 明显快于 2，
+        瓶颈在造帧；若两者接近，瓶颈在解析器（逐字节 feed + 每帧 258 次 CRC）。
+     4：只测解析。同 3，但关掉帧回调 frame_in，不写波形环形缓冲。
+        3 与 4 的差就是「入环」（拼点 + ring_push）的开销。
+   HAL_GetTick() 只有 1ms 分辨率，造不出 10000 帧/秒；节拍用
+   「HAL_GetTick() 毫秒 + SysTick->VAL 当前毫秒内的周期」拼出 µs 时间基。
+   （原先用过 DWT->CYCCNT，但这块 F746 上 CYCCNT 读出来恒为 0，
+     结果只造出第一帧，屏上 RX/SEQ 全是 0。SysTick 是 HAL 自己必须
+     依赖的计数器，一定在跑，所以换成它。）
+   注意：此路径不经以太网 DMA/UDP，测的是「fakesrc 造帧 + proto 解析 + 入环
+   + 绘制」这一段；且造帧本身也占时间，所以测得的帧率偏保守（低于纯解析上限）。
+   ==================================================== */
+#define STRESS_MODE       0
+
+/* 模式 3/4 都用「造一帧后反复喂同一缓冲」的方式注入，只有入环不同 */
+#if (STRESS_MODE == 3) || (STRESS_MODE == 4)
+  #define STRESS_REUSE_FRAME
+#endif
+
+#if (STRESS_MODE != 0)
+  /* 压力测试期间把整屏绘制降到 1 秒一次。
+     假帧是在主循环里造的，而正常 40ms 节拍下一次整屏绘制要 30~40ms，
+     占掉 90% 以上的时间——量到的就不是「造帧+解析+入环」的处理能力，
+     而是绘制占空比（实测 RX 只有 1100 多，远低于真实上限）。
+     降频后主循环几乎全给数据通路，RX 才是要的那个数。 */
+  #define DRAW_PERIOD_MS  1000U
+
+  /* 压力测试固定用这个档位（4 = 100µs/点 = 10000 帧/秒，0 = 10ms/点）。
+     以前靠长按板载按键 B1(PI11) 切档，但 B1 在部分板子上没接到 PI11，
+     长按没反应就把整个测试卡死了。这里开机直接指定档位，不依赖任何按键。 */
+  #define STRESS_GEAR     4
+#else
+  #define DRAW_PERIOD_MS  40U
+#endif
+
 /* ---------------- 界面布局 ---------------- */
 #define SCR_W            480
 #define SCR_H            272
@@ -135,9 +177,11 @@ static uint8_t g_gear = GEAR_10MS;
      A 回显等于请求值 → 立即清除（切换成功）；
      超时仍不等 → 清除（A 安全拒绝），下次按键重新从 A 的实际档位递增。
    屏幕档位与时间轴始终取 A 的 GEAR，不显示请求值。 */
+#if defined(RX_SOURCE_LINK)
 #define GEAR_REQ_HOLD_MS  1200
 static uint8_t  g_gear_req      = 0xFF;
 static uint32_t g_gear_req_tick = 0;
+#endif
 /* 最近一次下发的控制命令，联调时用 Live Watch 核对 B 到底发了什么 */
 static uint8_t  g_last_cmd      = 0xFF;
 static uint16_t g_last_param    = 0;
@@ -200,8 +244,6 @@ static uint8_t  g_last_phy_up  = 0;     /* 以太网 PHY 是否 link（区分“
 #endif
 static uint8_t  g_fps          = 0;     /* 实测渲染帧率，用于验收“≥20 帧/秒” */
 static uint16_t g_rx_fps       = 0;     /* 实测接收帧率（有效数据帧/秒），联调用 */
-/* 临时性能诊断：绘制四阶段耗时(ms)：0=Begin拷贝 1=清屏+波形 2=文字控件 3=End等VSYNC */
-static uint8_t  g_dbg_t[4]     = { 0, 0, 0, 0 };
 
 /* 导出菜单布局 */
 #define MN_X0       120
@@ -1093,28 +1135,19 @@ static void draw_link_stats(void)
   GUI_SetColor(GUI_DARKGRAY);
   GUI_DispStringAt("RX", 206, 264);
   GUI_SetColor(GUI_CYAN);
-  GUI_DispDecAt((I32)g_rx_fps, 222, 264, 4);
+  GUI_DispDecAt((I32)g_rx_fps, 222, 264, 5);
 
   /* 实测帧率：任务书提高部分（3）要求 ≥20 帧/秒，这里给出屏上依据 */
   GUI_SetColor(GUI_DARKGRAY);
-  GUI_DispStringAt("FPS", 252, 264);
+  GUI_DispStringAt("FPS", 258, 264);
   GUI_SetColor(g_fps >= 20 ? GUI_GREEN : GUI_ORANGE);
-  GUI_DispDecAt((I32)g_fps, 276, 264, 3);
+  GUI_DispDecAt((I32)g_fps, 282, 264, 3);
 
   link_poll();
 
-  /* 临时性能诊断：B/W/T/E 四阶段耗时(ms) */
-  GUI_SetFont(&GUI_Font6x8);
-  GUI_SetColor(GUI_DARKGRAY);  GUI_DispStringAt("B", 300, 264);
-  GUI_SetColor(GUI_WHITE);     GUI_DispDecAt((I32)g_dbg_t[0], 306, 264, 2);
-  GUI_SetColor(GUI_DARKGRAY);  GUI_DispStringAt("W", 320, 264);
-  GUI_SetColor(GUI_WHITE);     GUI_DispDecAt((I32)g_dbg_t[1], 326, 264, 2);
-  GUI_SetColor(GUI_DARKGRAY);  GUI_DispStringAt("T", 340, 264);
-  GUI_SetColor(GUI_WHITE);     GUI_DispDecAt((I32)g_dbg_t[2], 346, 264, 2);
-  GUI_SetColor(GUI_DARKGRAY);  GUI_DispStringAt("E", 360, 264);
-  GUI_SetColor(GUI_WHITE);     GUI_DispDecAt((I32)g_dbg_t[3], 366, 264, 2);
-
-  link_poll();
+  /* 绘制四阶段耗时诊断（原 B/W/T/E）已整体删除：底栏横向不够，
+     显示代码在 x=300~377（B300 W320 T340 E360，数字各 +6）。
+     若再要用，在 draw_screen 里补回 HAL_GetTick 采样与 g_dbg_t[4] 即可。 */
 
   /* A 板状态帧回执（验收记录用，无需挂调试器）：
      ST = 有效状态帧累计数，G = 状态帧 GEAR，M = 状态帧 CH_MASK（十六进制）。
@@ -1124,31 +1157,55 @@ static void draw_link_stats(void)
     char mb[3];
 
     GUI_SetColor(GUI_DARKGRAY);
-    GUI_DispStringAt("ST", 382, 264);
+    GUI_DispStringAt("ST", 308, 264);
     GUI_SetColor(ss->valid ? GUI_CYAN : GUI_GRAY);
-    GUI_DispDecAt((I32)ss->count, 394, 264, 4);
+    GUI_DispDecAt((I32)ss->count, 320, 264, 5);
 
     GUI_SetColor(GUI_DARKGRAY);
-    GUI_DispStringAt("G", 420, 264);
+    GUI_DispStringAt("G", 354, 264);
     GUI_SetColor(ss->valid ? GUI_CYAN : GUI_GRAY);
     if (ss->valid) {
-      GUI_DispDecAt((I32)ss->gear, 426, 264, 1);
+      GUI_DispDecAt((I32)ss->gear, 360, 264, 1);
     } else {
-      GUI_DispStringAt("-", 426, 264);
+      GUI_DispStringAt("-", 360, 264);
     }
 
     GUI_SetColor(GUI_DARKGRAY);
-    GUI_DispStringAt("M", 433, 264);
+    GUI_DispStringAt("M", 370, 264);
     GUI_SetColor(ss->valid ? GUI_CYAN : GUI_GRAY);
     if (ss->valid) {
       mb[0] = hex[(ss->ch_mask >> 4) & 0x0F];
       mb[1] = hex[ss->ch_mask & 0x0F];
       mb[2] = 0;
-      GUI_DispStringAt(mb, 439, 264);
+      GUI_DispStringAt(mb, 376, 264);
     } else {
-      GUI_DispStringAt("--", 439, 264);
+      GUI_DispStringAt("--", 376, 264);
     }
   }
+
+#if (STRESS_MODE != 0)
+  /* 压力测试标记：提示屏上 RX 是本地假帧的速率，不是 A 板实测。
+     后面再带上数据源档位 G 和板载按键 B1(PI11) 的实时电平 K：
+       G 变了 → 档位真的切成功（长按/点按生效）；
+       K 不跟着按键变 → 这块板子的 B1 没接到 PI11，切档只能靠触摸。 */
+  {
+    uint8_t k = (HAL_GPIO_ReadPin(GPIOI, GPIO_PIN_11) == GPIO_PIN_SET) ? 1 : 0;
+    char sb[9];
+
+    sb[0] = 'S';
+    sb[1] = (STRESS_MODE == 1) ? '1' : 'M';
+    sb[2] = '-';
+    sb[3] = 'G';
+    sb[4] = (char)('0' + ((g_gear < 5) ? g_gear : 0));
+    sb[5] = ' ';
+    sb[6] = 'K';
+    sb[7] = (char)('0' + k);
+    sb[8] = 0;
+
+    GUI_SetColor(GUI_ORANGE);
+    GUI_DispStringAt(sb, 390, 264);
+  }
+#endif
 }
 
 /* ---------------- 数字键盘（设置矩形波频率） ----------------
@@ -1721,13 +1778,9 @@ static void handle_tap(uint16_t x, uint16_t y)
    ------------------------------------------ */
 static void draw_screen(void)
 {
-  uint32_t t0, t1, t2, t3;
-
-  t0 = HAL_GetTick();
   GUI_MULTIBUF_Begin();
   fb_setup();             /* 取本次绘制的后台缓冲地址（波形直写用） */
   make_linear_copy();     /* 定格本帧数据：绘制期间收包不再影响画面 */
-  t1 = HAL_GetTick();
 
   GUI_SetBkColor(GUI_BLACK);
   fb_clear();             /* 清屏直写帧缓冲，内部每 32 行让出一次收包 */
@@ -1736,7 +1789,6 @@ static void draw_screen(void)
   if (cur_mask() & MASK_CH2) { draw_analog(s_lin2, GUI_RED);  }
   draw_digital();
   draw_trig_level();      /* 触发电平虚线，压在波形之上 */
-  t2 = HAL_GetTick();
 
   /* SDRAM 改成可缓冲写后，直写的像素可能还在写缓冲里；
      后面的 emWin 文字是"读-改-写"，必须先等前面的写真正落到内存。 */
@@ -1753,17 +1805,81 @@ static void draw_screen(void)
   draw_keypad();          /* 键盘弹出时覆盖在波形之上 */
   draw_menu();            /* 导出菜单放在最上层 */
   draw_trig_panel();      /* 触发设置面板 */
-  t3 = HAL_GetTick();
 
   __DSB();                /* 写缓冲排空后再切页，避免半帧上屏 */
   GUI_MULTIBUF_End();
-
-  /* 临时性能诊断：B=Begin（缓冲区拷贝），W=清屏+波形，T=文字/控件，E=End（等 VSYNC） */
-  g_dbg_t[0] = (uint8_t)(t1 - t0);
-  g_dbg_t[1] = (uint8_t)(t2 - t1);
-  g_dbg_t[2] = (uint8_t)(t3 - t2);
-  g_dbg_t[3] = (uint8_t)(HAL_GetTick() - t3);
 }
+
+#if !defined(RX_SOURCE_LINK) && (STRESS_MODE != 0)
+/* ---------------- 假帧压力测试节拍 ----------------
+   µs 时间基 = HAL_GetTick()（ms，SysTick 中断累加）
+             + SysTick->VAL（当前这一毫秒里已经过去的周期数）。
+   SysTick 由 HAL_InitTick() 配置成 1ms 重装，是 HAL_GetTick() 的来源，
+   必然在跑，不依赖调试单元（DWT->CYCCNT 在本板读出来恒为 0）。
+   32 位 µs 约 71 分钟回绕，做有符号差比较即可。
+--------------------------------------------------------- */
+static uint32_t stress_now_us(void)
+{
+  uint32_t load = SysTick->LOAD + 1U;          /* 1ms 的周期数 */
+  uint32_t per  = SystemCoreClock / 1000000U;  /* 1µs 的周期数 */
+  uint32_t ms, val;
+
+  if (per == 0U) {
+    per = 1U;
+  }
+  if (load == 1U) {                 /* SysTick 没配置，退化成纯毫秒 */
+    return HAL_GetTick() * 1000U;
+  }
+
+  /* 两次读 ms 一致才算数，避免恰好跨过重装点导致少算 1ms */
+  do {
+    ms  = HAL_GetTick();
+    val = SysTick->VAL;             /* 递减计数器：重装值 → 0 */
+  } while (ms != HAL_GetTick());
+
+  return ms * 1000U + (load - val) / per;
+}
+
+/* 相邻两帧应间隔的 µs：按当前档位满速（dt_us × 50 点）。
+   STRESS_MODE ≥ 2（不限速）返回 0。 */
+static uint32_t stress_period_us(void)
+{
+  /* 用预处理而不是运行时 if：STRESS_MODE 是编译期常量，高优化下
+     "if (STRESS_MODE >= 2) return 0;" 后面的 return 会被判为不可达（Pe111）。 */
+#if (STRESS_MODE >= 2)
+  return 0;
+#else
+  return (uint32_t)dt_us_tab[g_gear < 5 ? g_gear : 0] * (uint32_t)PROTO_N_POINTS;
+#endif
+}
+
+/* 到点返回 1 并推进节拍，没到返回 0；period=0 表示不限速 */
+static uint8_t stress_due(uint32_t period)
+{
+  static uint32_t next;
+  static uint8_t  started;
+  uint32_t now;
+
+  if (period == 0) {
+    return 1;
+  }
+  now = stress_now_us();
+  if (!started) {
+    started = 1;
+    next = now;
+  }
+  if ((int32_t)(now - next) < 0) {
+    return 0;
+  }
+  next += period;
+  /* 落后一整帧以上（例如一次绘制停了几十毫秒）：重新对齐、不追帧，
+     否则会连发一串假帧，把帧率读数虚高 */
+  if ((int32_t)(now - next) >= 0) {
+    next = now + period;
+  }
+  return 1;
+}
+#endif
 
 /* ---------------- 主任务 ----------------
    循环不再用 HAL_Delay(50) 阻塞：以太网是轮询模式，必须高频调用
@@ -1778,7 +1894,12 @@ void MainTask(void)
 #else
   uint8_t  frame_buf[PROTO_DATA_LEN];
   uint16_t i;
+#if (STRESS_MODE == 0)
   uint32_t last_fake = 0;
+#else
+  uint32_t stress_period;
+  uint8_t  stress_gear = 0xFF;     /* 0xFF = 尚未计算过，强制首次算一遍 */
+#endif
 #endif
   uint32_t frame = 0;
   uint8_t  ts_ok;
@@ -1806,8 +1927,18 @@ void MainTask(void)
 #else
   fakesrc_init();
   proto_reset();
+#if (STRESS_MODE != 0)
+  g_gear = STRESS_GEAR;     /* 固定档位，开机即满速，不需要按键 */
 #endif
+#endif
+  #if (STRESS_MODE == 4)
+  /* M4：不装回调，只量解析与 CRC。frame_in 仍要被引用一次，
+     否则 IAR 报 Pe177「declared but never referenced」。 */
+  (void)frame_in;
+  proto_set_frame_cb(0);
+#else
   proto_set_frame_cb(frame_in);   /* 每帧有效数据帧立即入环 */
+#endif
   ts_ok = touch_init();
   log_uart_init();        /* USART1 经 ST-Link 虚拟串口，用于导出文件到 PC */
 
@@ -1828,7 +1959,9 @@ void MainTask(void)
   GUI_Clear();
 
   fps_tick = HAL_GetTick();
-  last_draw = fps_tick;
+  /* 减一个周期：进循环第一轮就画一帧。压力测试下 DRAW_PERIOD_MS 是 1000，
+     不这么做的话上电后要黑屏 1 秒才出画面。 */
+  last_draw = fps_tick - DRAW_PERIOD_MS;
 
   for (;;) {
     /* --- 数据入口（每轮都转，频率远高于渲染） --- */
@@ -1840,6 +1973,28 @@ void MainTask(void)
 #endif
 
 #ifndef RX_SOURCE_LINK
+#if (STRESS_MODE != 0)
+    /* --- 假帧压力测试：µs 节拍造帧。
+           M1 = 当前档位满速（G4 即 100µs/帧 = 10000 帧/秒）
+           M2 = 不限速，主循环能造多快就造多快
+           M3 = 不造帧，反复喂同一帧（只量解析+入环）
+       档位变了才重算周期（M3 顺便重造一次帧缓冲）。 */
+    if (stress_gear != g_gear) {
+      stress_gear   = g_gear;
+      stress_period = stress_period_us();
+#if defined(STRESS_REUSE_FRAME)
+      fakesrc_tick(frame_buf, g_gear, g_mask);
+#endif
+    }
+    if (stress_due(stress_period)) {
+#if !defined(STRESS_REUSE_FRAME)
+      fakesrc_tick(frame_buf, g_gear, g_mask);
+#endif
+      for (i = 0; i < PROTO_DATA_LEN; i++) {
+        proto_feed(frame_buf[i]);
+      }
+    }
+#else
     /* --- 假数据：每 50ms 造一帧，模拟 A 板 20 帧/秒 --- */
     if ((uint32_t)(HAL_GetTick() - last_fake) >= 50) {
       last_fake = HAL_GetTick();
@@ -1848,6 +2003,7 @@ void MainTask(void)
         proto_feed(frame_buf[i]);
       }
     }
+#endif
 #endif
 
     /* --- 触摸：采样在 touch_service() 内完成（绘制期间由 link_poll 驱动），
@@ -1869,10 +2025,16 @@ void MainTask(void)
         key_long = 0;
       } else if (key && !key_long &&
                  (uint32_t)(HAL_GetTick() - key_tick) >= 1000U) {
-        key_long        = 1;
+        key_long = 1;
+#if defined(RX_SOURCE_LINK)
         g_gear_req      = GEAR_100US;
         g_gear_req_tick = HAL_GetTick();
         send_ctrl(CMD_GEAR, GEAR_100US);
+#else
+        /* 自测模式没有 A 板状态帧回执，g_gear 就是数据源档位，直接生效 */
+        g_gear = GEAR_100US;
+        send_ctrl(CMD_GEAR, GEAR_100US);
+#endif
       } else if (!key && key_prev && !key_long) {
         gear_next();
       }
@@ -1939,9 +2101,10 @@ void MainTask(void)
     }
 #endif
 
-    /* --- 渲染：40ms 节拍 = 25 帧/s，与数据入口解耦，给"≥20fps"留余量 ---
-       若单次绘制耗时超过 40ms，实际帧率会低于 25，屏上 FPS 会给出实测值。 */
-    if ((uint32_t)(HAL_GetTick() - last_draw) >= 40) {
+    /* --- 渲染：默认 40ms 节拍 = 25 帧/s，与数据入口解耦，给"≥20fps"留余量 ---
+       若单次绘制耗时超过 40ms，实际帧率会低于 25，屏上 FPS 会给出实测值。
+       压力测试时用 DRAW_PERIOD_MS=1000，理由见文件头的 STRESS_MODE 说明。 */
+    if ((uint32_t)(HAL_GetTick() - last_draw) >= DRAW_PERIOD_MS) {
       last_draw = HAL_GetTick();
 
       g_last_frame   = frame;
@@ -1969,7 +2132,8 @@ void MainTask(void)
         g_rx_fps = (uint16_t)(((proto_stat()->good - rx_prev) * 1000U) / dt);
         rx_prev  = proto_stat()->good;
 
-        /* 以太网轮询频率：单次最多取 8 帧，8 × 该值 需大于 A 的发送帧率 */
+        /* 以太网轮询频率：单次最多取 16 帧（ETH_RX_INPUT_BUDGET），
+           16 × 该值 需大于 A 的发送帧率 */
         g_poll_fps = (uint16_t)((g_poll_cnt * 1000U) / dt);
         g_poll_cnt = 0;
 

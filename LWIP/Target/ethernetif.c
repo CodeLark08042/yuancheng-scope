@@ -87,7 +87,10 @@ typedef struct
 } RxBuff_t;
 
 /* Memory Pool Declaration */
-#define ETH_RX_BUFFER_CNT             12U
+/* 零拷贝 pbuf 池大小。约束（见文件头 2.a）：必须在 ETH_RX_DESC_CNT ~ 2*ETH_RX_DESC_CNT
+   之间。ETH_RX_DESC_CNT 已提到 16，故这里取 24（16 ≤ 24 ≤ 32）。
+   每个 RxBuff_t ≈ 1536+32+pbuf_custom ≈ 1600 B，24 个约占 38 KB。 */
+#define ETH_RX_BUFFER_CNT             24U
 LWIP_MEMPOOL_DECLARE(RX_POOL, ETH_RX_BUFFER_CNT, sizeof(RxBuff_t), "Zero-copy RX PBUF pool");
 
 /* 单次 ethernetif_input 最多取走的帧数（见文件末尾 ethernetif_input 的说明）。
@@ -101,19 +104,19 @@ static uint8_t RxAllocStatus;
 
 #if defined ( __ICCARM__ ) /*!< IAR Compiler */
 
-/* ETH_DMADescTypeDef 为 40 字节。RX 描述符 8 个占 0x2004c000~0x2004c13f，
-   因此 Tx 描述符表起始地址必须从 0x2004c0a0 后移到 0x2004c140，否则链接报
-   "absolute section overlaps"。Tx 4 个占 0x2004c140~0x2004c1df，仍在
+/* ETH_DMADescTypeDef 为 40 字节。RX 描述符 16 个占 0x2004c000~0x2004c27f，
+   因此 Tx 描述符表起始地址必须从 0x2004c0a0 后移到 0x2004c280，否则链接报
+   "absolute section overlaps"。Tx 4 个占 0x2004c280~0x2004c31f，仍在
    0x20048000 起的 32KB 非缓存 MPU 区内。 */
 #pragma location=0x2004c000
 ETH_DMADescTypeDef  DMARxDscrTab[ETH_RX_DESC_CNT]; /* Ethernet Rx DMA Descriptors */
-#pragma location=0x2004c140
+#pragma location=0x2004c280
 ETH_DMADescTypeDef  DMATxDscrTab[ETH_TX_DESC_CNT]; /* Ethernet Tx DMA Descriptors */
 
 #elif defined ( __CC_ARM )  /* MDK ARM Compiler */
 
 __attribute__((at(0x2004c000))) ETH_DMADescTypeDef  DMARxDscrTab[ETH_RX_DESC_CNT]; /* Ethernet Rx DMA Descriptors */
-__attribute__((at(0x2004c140))) ETH_DMADescTypeDef  DMATxDscrTab[ETH_TX_DESC_CNT]; /* Ethernet Tx DMA Descriptors */
+__attribute__((at(0x2004c280))) ETH_DMADescTypeDef  DMATxDscrTab[ETH_TX_DESC_CNT]; /* Ethernet Tx DMA Descriptors */
 
 #elif defined ( __GNUC__ ) /* GNU Compiler */
 
