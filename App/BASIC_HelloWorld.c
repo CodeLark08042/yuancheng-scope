@@ -643,6 +643,8 @@ static void draw_grid(void)
   for (i = 0; i <= DIV_X; i++) {
     int x = i * (SCR_W - 1) / DIV_X;
     GUI_DrawVLine(x, WAVE_Y0, WAVE_Y0 + WAVE_H);
+    /* 数字区沿用同一组竖线，让"时间刻度与模拟通道一致"肉眼可见 */
+    GUI_DrawVLine(x, DIG_Y0, DIG_Y0 + 3 * DIG_LANE_H);
     link_poll();
   }
   for (i = 0; i <= 8; i++) {
