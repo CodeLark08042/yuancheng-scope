@@ -245,19 +245,19 @@ static uint8_t  g_last_phy_up  = 0;     /* 以太网 PHY 是否 link（区分“
 static uint8_t  g_fps          = 0;     /* 实测渲染帧率，用于验收“≥20 帧/秒” */
 static uint16_t g_rx_fps       = 0;     /* 实测接收帧率（有效数据帧/秒），联调用 */
 
-/* 导出菜单布局 */
-#define MN_X0       120
-#define MN_Y0        80
-#define MN_X1       360
-#define MN_Y1       210
-#define MN_BTN_Y0   115
+/* 导出菜单布局（顶部预留两行组员信息） */
+#define MN_X0       100
+#define MN_Y0        52
+#define MN_X1       380
+#define MN_Y1       236
+#define MN_BTN_Y0   128
 #define MN_BTN_H     36
 #define MN_BTN_W     96
-#define MN_CAN_Y    168
-#define MN_CSV_X    135
-#define MN_BMP_X    249
-#define MN_CAN_X    180
-#define MN_CAN_W    120
+#define MN_CAN_Y    186
+#define MN_CSV_X    120
+#define MN_BMP_X    264
+#define MN_CAN_X    160
+#define MN_CAN_W    160
 
 /* 键盘布局常量（弹窗占满屏宽 30~450，高 30~260） */
 #define KP_X0        30
@@ -442,6 +442,14 @@ static void fb_hline(int x0, int x1, int y, uint32_t c)
   for (x = x0; x <= x1; x++) {
     *p++ = c;
   }
+}
+
+static void fb_pixel(int x, int y, uint32_t c)
+{
+  if (x < 0 || x >= SCR_W || y < 0 || y >= SCR_H) {
+    return;
+  }
+  s_fb[(uint32_t)y * SCR_W + (uint32_t)x] = c;
 }
 
 /* 清屏也改直写帧缓冲：
@@ -1625,6 +1633,68 @@ static void do_export_bmp(void)
   (void)export_bmp(fb);
 }
 
+/* ---------------- 组员姓名点阵 ----------------
+   工程只有 GUI_Font6x8 / 8x16 两套西文字体，没有任何中文字库，
+   因此这里只给用到的 6 个字内置 16×16 点阵（每字 16 行 × 2 字节，MSB 在左）。
+   只在 SAVE 弹窗打开时绘制，逐点直写帧缓冲，不经过 emWin。 */
+static const uint8_t s_cn_zu[32] = {
+  0x00,0x00, 0x00,0x00, 0x11,0xFC, 0x21,0x84,
+  0x21,0x84, 0x4D,0x84, 0x79,0xFC, 0x11,0x84,
+  0x11,0x84, 0x21,0x84, 0x7D,0xFC, 0x01,0x84,
+  0x01,0x84, 0x7D,0x84, 0x43,0xFE, 0x00,0x00
+};
+
+static const uint8_t s_cn_li[32] = {
+  0x01,0x80, 0x01,0x80, 0x7F,0xFE, 0x07,0xE0,
+  0x0D,0xB0, 0x39,0x9E, 0x7F,0xF6, 0x10,0x30,
+  0x00,0xC0, 0x01,0x80, 0x7F,0xFE, 0x01,0x80,
+  0x01,0x80, 0x07,0x00, 0x02,0x00, 0x00,0x00
+};
+
+static const uint8_t s_cn_kai[32] = {
+  0x00,0x00, 0x3F,0xFC, 0x06,0x20, 0x06,0x20,
+  0x06,0x20, 0x06,0x20, 0x7F,0xFE, 0x7F,0xFE,
+  0x06,0x20, 0x04,0x20, 0x04,0x20, 0x0C,0x20,
+  0x18,0x20, 0x70,0x20, 0x00,0x00, 0x00,0x00
+};
+
+static const uint8_t s_cn_xu[32] = {
+  0x18,0x00, 0x18,0x00, 0x10,0x7C, 0x7E,0x44,
+  0x7E,0x44, 0x12,0x44, 0x12,0x7C, 0x12,0x44,
+  0x12,0x44, 0x12,0x44, 0x32,0x7C, 0x22,0x00,
+  0x62,0x02, 0x43,0xFE, 0x00,0x00, 0x00,0x00
+};
+
+static const uint8_t s_cn_zhan[32] = {
+  0x06,0x00, 0x0F,0xF0, 0x18,0x20, 0x3F,0xFE,
+  0x22,0x18, 0x2E,0xC8, 0x3F,0xFE, 0x20,0x00,
+  0x27,0xF8, 0x20,0x00, 0x27,0xF8, 0x2F,0xFC,
+  0x6C,0x04, 0x4F,0xFC, 0x00,0x04, 0x00,0x00
+};
+
+static const uint8_t s_cn_lin[32] = {
+  0x00,0x00, 0x10,0x20, 0x10,0x20, 0x10,0x20,
+  0x7F,0xFE, 0x12,0x20, 0x10,0x70, 0x34,0x70,
+  0x3C,0xF8, 0x74,0xAC, 0x51,0xA6, 0x53,0x22,
+  0x10,0x20, 0x10,0x20, 0x10,0x20, 0x00,0x00
+};
+
+static void draw_cn16(int x, int y, const uint8_t *bmp)
+{
+  uint32_t c = FB_PIX(GUI_BLACK);
+  int row, bit;
+
+  for (row = 0; row < 16; row++) {
+    uint16_t v = (uint16_t)(((uint16_t)bmp[row * 2] << 8) | bmp[row * 2 + 1]);
+
+    for (bit = 0; bit < 16; bit++) {
+      if (v & (uint16_t)(0x8000u >> bit)) {
+        fb_pixel(x + bit, y + row, c);
+      }
+    }
+  }
+}
+
 static void draw_menu(void)
 {
   if (!g_menu_open) {
@@ -1637,10 +1707,28 @@ static void draw_menu(void)
   GUI_DrawRect(MN_X0, MN_Y0, MN_X1, MN_Y1);
   GUI_DrawRect(MN_X0 + 1, MN_Y0 + 1, MN_X1 - 1, MN_Y1 - 1);
 
+  /* 组员信息（评分表要求界面显示全部组员姓名学号）。
+     放在 SAVE 弹窗顶部：波形区坐标一律不动，点 SAVE 即可看到。
+     工程里没有中文字库，6 个汉字走内置 16×16 点阵直写帧缓冲。 */
   GUI_SetFont(&GUI_Font8x16);
   GUI_SetTextMode(GUI_TM_TRANS);
   GUI_SetColor(GUI_BLACK);
-  GUI_DispStringAt("Export Waveform", MN_X0 + 12, MN_Y0 + 10);
+  GUI_DispStringAt("3", MN_X0 + 12, MN_Y0 + 10);
+  draw_cn16(MN_X0 + 20, MN_Y0 + 10, s_cn_zu);
+  draw_cn16(MN_X0 + 44, MN_Y0 + 10, s_cn_li);
+  draw_cn16(MN_X0 + 60, MN_Y0 + 10, s_cn_kai);
+  draw_cn16(MN_X0 + 76, MN_Y0 + 10, s_cn_xu);
+  GUI_DispStringAt("23211239", MN_X0 + 100, MN_Y0 + 10);
+
+  draw_cn16(MN_X0 + 12, MN_Y0 + 30, s_cn_zhan);
+  draw_cn16(MN_X0 + 28, MN_Y0 + 30, s_cn_lin);
+  GUI_DispStringAt("23271081", MN_X0 + 100, MN_Y0 + 30);
+
+  GUI_SetColor(GUI_GRAY);
+  GUI_DrawHLine(MN_Y0 + 50, MN_X0 + 12, MN_X1 - 12);
+
+  GUI_SetColor(GUI_BLACK);
+  GUI_DispStringAt("Export Waveform", MN_X0 + 12, MN_Y0 + 54);
 
   draw_key(MN_CSV_X, MN_BTN_Y0, MN_CSV_X + MN_BTN_W, MN_BTN_Y0 + MN_BTN_H,
            "CSV", GUI_CYAN);
