@@ -15,6 +15,17 @@ EWARM/Backup of *.ewp
 *.hex
 *.out
 
+# 本地生成的预览、报告辅助文件与缓存
+.trae-html-share-packages/
+__pycache__/
+_build_report*.py
+_report_assets/
+axis_design_preview.html
+scope_preview.html
+yuancheng.pdf
+yuancheng.txt
+~$*.docx
+
 # 系统文件
 Thumbs.db
 desktop.ini
