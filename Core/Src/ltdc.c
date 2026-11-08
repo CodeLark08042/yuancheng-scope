@@ -123,7 +123,7 @@ void HAL_LTDC_MspInit(LTDC_HandleTypeDef* ltdcHandle)
     PeriphClkInitStruct.PLLSAI.PLLSAIQ = 2;
     PeriphClkInitStruct.PLLSAI.PLLSAIP = RCC_PLLSAIP_DIV2;
     PeriphClkInitStruct.PLLSAIDivQ = 1;
-    PeriphClkInitStruct.PLLSAIDivR = RCC_PLLSAIDIVR_2;
+    PeriphClkInitStruct.PLLSAIDivR = RCC_PLLSAIDIVR_4;
     if (HAL_RCCEx_PeriphCLKConfig(&PeriphClkInitStruct) != HAL_OK)
     {
       Error_Handler();
@@ -206,6 +206,9 @@ void HAL_LTDC_MspInit(LTDC_HandleTypeDef* ltdcHandle)
     GPIO_InitStruct.Alternate = GPIO_AF14_LTDC;
     HAL_GPIO_Init(GPIOI, &GPIO_InitStruct);
 
+    /* LTDC interrupt Init */
+    HAL_NVIC_SetPriority(LTDC_IRQn, 14, 0);
+    HAL_NVIC_EnableIRQ(LTDC_IRQn);
   /* USER CODE BEGIN LTDC_MspInit 1 */
     /* STemWin 三缓冲依赖 LTDC 行中断换页，必须使能 LTDC 全局中断。
        原 STemWin 例程的 HAL_LTDC_MspInit 里有这三行，移植时随例程函数一起被删掉了。 */
@@ -289,6 +292,8 @@ void HAL_LTDC_MspDeInit(LTDC_HandleTypeDef* ltdcHandle)
 
     HAL_GPIO_DeInit(GPIOI, GPIO_PIN_10|GPIO_PIN_9|GPIO_PIN_15|GPIO_PIN_14);
 
+    /* LTDC interrupt Deinit */
+    HAL_NVIC_DisableIRQ(LTDC_IRQn);
   /* USER CODE BEGIN LTDC_MspDeInit 1 */
 
   /* USER CODE END LTDC_MspDeInit 1 */

@@ -55,10 +55,10 @@
 /* USER CODE END 0 */
 
 /* External variables --------------------------------------------------------*/
-
+extern LTDC_HandleTypeDef hltdc;
+extern UART_HandleTypeDef huart6;
 /* USER CODE BEGIN EV */
-extern LTDC_HandleTypeDef hltdc;   /* 定义在 ltdc.c，供 LTDC_IRQHandler 使用 */
-extern UART_HandleTypeDef huart6;  /* 定义在 usart.c，供 USART6_IRQHandler 使用 */
+
 /* USER CODE END EV */
 
 /******************************************************************************/
@@ -213,11 +213,22 @@ void EXTI15_10_IRQHandler(void)
   /* USER CODE END EXTI15_10_IRQn 1 */
 }
 
-/* USER CODE BEGIN 1 */
+/**
+  * @brief This function handles USART6 global interrupt.
+  */
+void USART6_IRQHandler(void)
+{
+  /* USER CODE BEGIN USART6_IRQn 0 */
+
+  /* USER CODE END USART6_IRQn 0 */
+  HAL_UART_IRQHandler(&huart6);
+  /* USER CODE BEGIN USART6_IRQn 1 */
+
+  /* USER CODE END USART6_IRQn 1 */
+}
+
 /**
   * @brief This function handles LTDC global interrupt.
-  *        STemWin 三缓冲靠该中断在 LCD_X 行事件回调中切换 CFBAR 完成换页，
-  *        缺了它屏幕会一直黑屏（背光亮但无画面）。
   */
 void LTDC_IRQHandler(void)
 {
@@ -230,18 +241,7 @@ void LTDC_IRQHandler(void)
   /* USER CODE END LTDC_IRQn 1 */
 }
 
-/**
-  * @brief This function handles USART6 global interrupt.
-  *        接收 A 板发来的数据帧字节流，回调里链式重启单字节接收。
-  */
-void USART6_IRQHandler(void)
-{
-  /* USER CODE BEGIN USART6_IRQn 0 */
-
-  /* USER CODE END USART6_IRQn 0 */
-  HAL_UART_IRQHandler(&huart6);
-  /* USER CODE BEGIN USART6_IRQn 1 */
-
-  /* USER CODE END USART6_IRQn 1 */
-}
+/* USER CODE BEGIN 1 */
+/* LTDC/USART6 的 IRQHandler 已由 CubeMX 按 .ioc 的 NVIC 配置生成在上方，
+   这里不能再定义一份，否则重编译会报 redefinition。 */
 /* USER CODE END 1 */
